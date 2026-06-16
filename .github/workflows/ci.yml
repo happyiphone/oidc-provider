@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+defaults:
+  run:
+    working-directory: app
+
+jobs:
+  # Gate 1 — build + the in-repo conformance/abuse integration suite (xUnit).
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: oidc
+          POSTGRES_USER: oidc
+          POSTGRES_PASSWORD: oidc_dev_only
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U oidc" --health-interval 5s
+          --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s
+          --health-timeout 3s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+      - run: dotnet build OidcProvider.sln -c Release
+      - name: Integration / abuse-case suite
+        env:
+          TEST_PG: "Host=localhost;Port=5432;Database=oidc_test;Username=oidc;Password=oidc_dev_only"
+          TEST_REDIS: "localhost:6379"
+        run: dotnet test tests/OidcProvider.Tests/OidcProvider.Tests.csproj -c Release --no-build
+
+  # Gate 2 — load smoke (sustainable tier) so a perf regression fails the build.
+  loadtest-smoke:
+    needs: test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: { POSTGRES_DB: oidc, POSTGRES_USER: oidc, POSTGRES_PASSWORD: oidc_dev_only }
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U oidc" --health-interval 5s --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 3s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: 9.0.x }
+      - uses: grafana/setup-k6-action@v1
+      - name: Start provider
+        env:
+          ASPNETCORE_ENVIRONMENT: Development
+          ASPNETCORE_URLS: http://127.0.0.1:8081
+          ConnectionStrings__Postgres: "Host=localhost;Port=5432;Database=oidc;Username=oidc;Password=oidc_dev_only"
+          ConnectionStrings__Redis: "localhost:6379"
+          Oidc__Issuer: "http://localhost:8081/"
+          Oidc__Signing__Mode: Dev
+        run: |
+          dotnet run --project src/OidcProvider.Api -c Release &
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8081/.well-known/openid-configuration && break || sleep 1
+          done
+      - name: k6 smoke (token, medium tier)
+        run: k6 run -e TIER=medium loadtest/token.js

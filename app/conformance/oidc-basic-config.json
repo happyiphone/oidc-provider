@@ -1,0 +1,22 @@
+{
+  "//": "OIDF conformance-suite test config for the Basic OP profile. Edit `issuer` and the",
+  "//2": "client block to match your TLS-fronted deployment, then attach to the plan",
+  "//3": "'oidcc-basic-certification-test-plan'. The demo client below is the seeded one.",
+  "alias": "oidc-provider-basic",
+  "description": "OIDC Provider — Basic OP certification",
+  "server": {
+    "discoveryUrl": "https://your-idp.example/.well-known/openid-configuration"
+  },
+  "client": {
+    "client_id": "demo-web",
+    "client_secret": "demo-secret-dev-only",
+    "redirect_uri": "https://your-rp.example/callback",
+    "scope": "openid email profile"
+  },
+  "consent": {
+    "//": "Interactive: the suite drives the login + consent UI (alice / password123!).",
+    "username": "alice",
+    "password": "password123!"
+  },
+  "//profiles": "Basic OP first; then oidcc-config-certification, refresh-token tests; then FAPI2 (PAR) per delivery-plan.md"
+}

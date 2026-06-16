@@ -1,0 +1,50 @@
+# OIDC Provider — local development stack.
+# Brings up Postgres + Redis + the provider API. Production swaps the dev
+# signing key for KMS (see ../docs/oidc-provider/kms-signing.md) and adds the
+# OIDF conformance suite as a separate compose profile.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: oidc
+      POSTGRES_USER: oidc
+      POSTGRES_PASSWORD: oidc_dev_only
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U oidc"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    # noeviction so unexpired security keys (codes/sessions) are never evicted (ADR-0006)
+    command: ["redis-server", "--maxmemory-policy", "noeviction", "--save", ""]
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__Postgres: "Host=postgres;Database=oidc;Username=oidc;Password=oidc_dev_only"
+      ConnectionStrings__Redis: "redis:6379"
+      Oidc__Issuer: "http://localhost:8080/"
+      # Dev signing: ephemeral ES256 key in-process. PRODUCTION: set Oidc__Signing__Mode=Kms
+      Oidc__Signing__Mode: "Dev"
+    ports: ["8080:8080"]
+
+volumes:
+  pgdata:

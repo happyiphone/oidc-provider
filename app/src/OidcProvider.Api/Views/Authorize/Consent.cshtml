@@ -1,0 +1,19 @@
+@model ConsentViewModel
+@{ ViewData["Title"] = "Authorize"; }
+
+<h1>Authorize <code>@Model.ClientId</code></h1>
+<p>This application is requesting access to:</p>
+<ul class="scopes">
+    @foreach (var s in Model.Scopes) { <li>@s</li> }
+</ul>
+
+<form method="post" action="/authorize">
+    @Html.AntiForgeryToken()
+    @* Echo the original authorization parameters so the POST carries the full request. *@
+    @foreach (var p in Model.Parameters)
+    {
+        <input type="hidden" name="@p.Key" value="@p.Value" />
+    }
+    <button type="submit" name="submit" value="accept">Allow</button>
+    <button type="submit" name="submit" value="deny">Deny</button>
+</form>

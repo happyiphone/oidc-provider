@@ -1,0 +1,6 @@
+# build output
+**/bin/
+**/obj/
+**/.vs/
+*.user
+.DS_Store

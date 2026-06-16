@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>@ViewData["Title"] · Sign in</title>
+    <style>
+        :root { color-scheme: light dark; }
+        body { font: 15px/1.5 system-ui, sans-serif; max-width: 24rem; margin: 4rem auto; padding: 0 1rem; }
+        h1 { font-size: 1.25rem; }
+        label { display: block; margin: .75rem 0 .25rem; font-weight: 600; }
+        input[type=text], input[type=password] { width: 100%; padding: .5rem; box-sizing: border-box; }
+        button { margin-top: 1rem; padding: .5rem 1rem; cursor: pointer; }
+        .err { color: #c00; }
+        .scopes { padding-left: 1.25rem; }
+        .muted { color: #666; font-size: .85rem; }
+    </style>
+</head>
+<body>
+    @RenderBody()
+</body>
+</html>

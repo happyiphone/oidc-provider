@@ -1,0 +1,172 @@
+using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
+using OidcProvider.Api;
+using OidcProvider.Api.Signing;
+using OidcProvider.Api.Worker;
+using OidcProvider.Core.Data;
+using OidcProvider.Core.Services;
+using OidcProvider.Core.Signing;
+using OpenIddict.Abstractions;
+using OpenIddict.Server;
+using StackExchange.Redis;
+using static OpenIddict.Abstractions.OpenIddictConstants;
+
+var builder = WebApplication.CreateBuilder(args);
+var cfg = builder.Configuration;
+
+// ---- Data: Postgres + OpenIddict's protocol tables -------------------------
+builder.Services.AddDbContext<AuthDbContext>(o =>
+{
+    o.UseNpgsql(cfg.GetConnectionString("Postgres"));
+    o.UseOpenIddict();
+});
+
+// ---- Redis (ephemeral store, ADR-0006) -------------------------------------
+builder.Services.AddSingleton<IConnectionMultiplexer>(
+    _ => ConnectionMultiplexer.Connect(cfg.GetConnectionString("Redis")!));
+
+// ---- Domain services -------------------------------------------------------
+builder.Services.Configure<OidcSigningConfig>(cfg.GetSection("Oidc:Signing"));
+builder.Services.AddSingleton(new PpidOptions
+{
+    // ADR-0005/0010: long-lived, KMS-guarded in prod. Dev default from config.
+    DerivationKeyBase64 = cfg["Oidc:PpidKeyBase64"]
+        ?? Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("dev-ppid-derivation-key-32bytes!!"))
+});
+builder.Services.AddScoped<IPairwiseSubjects, PairwiseSubjects>();
+builder.Services.AddScoped<IConsentStore, ConsentStore>();
+builder.Services.AddScoped<IUserService, UserService>();
+builder.Services.AddScoped<ISigningKeyStore, EfSigningKeyStore>();
+builder.Services.AddScoped<IOpenIddictTokenManagerFacade, TokenFamilyFacade>();
+builder.Services.AddSingleton<IUserSession, RedisUserSession>();
+builder.Services.AddSingleton<ITotpService, TotpService>();
+builder.Services.AddSingleton(new WebAuthnConfig
+{
+    RpId = cfg["Oidc:WebAuthn:RpId"] ?? "localhost",
+    Origin = cfg["Oidc:WebAuthn:Origin"] ?? "http://localhost:8081",
+});
+builder.Services.AddSingleton<IWebAuthnService, WebAuthnService>();
+
+// ---- Cookie auth for the login/consent UI ----------------------------------
+builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+    .AddCookie(o =>
+    {
+        o.LoginPath = "/account/login";
+        o.Cookie.HttpOnly = true;
+        o.Cookie.SameSite = SameSiteMode.Lax;
+        // Secure in prod; SameAsRequest in dev so the cookie works over plain-HTTP local/test.
+        o.Cookie.SecurePolicy = builder.Environment.IsDevelopment()
+            ? CookieSecurePolicy.SameAsRequest : CookieSecurePolicy.Always;
+    });
+
+// ---- OpenIddict ------------------------------------------------------------
+builder.Services.AddOpenIddict()
+    .AddCore(o => o.UseEntityFrameworkCore().UseDbContext<AuthDbContext>())
+    .AddServer(o =>
+    {
+        // Endpoints (method names target OpenIddict 5.x; pin per your version).
+        o.SetAuthorizationEndpointUris("authorize")
+         .SetTokenEndpointUris("token")
+         .SetUserInfoEndpointUris("userinfo")
+         .SetIntrospectionEndpointUris("introspect")
+         .SetRevocationEndpointUris("revoke")
+         .SetEndSessionEndpointUris("logout")
+         .SetPushedAuthorizationEndpointUris("par"); // RFC 9126 (ADR-0009)
+
+        // ADR-0001: only the safe grants. Implicit / password deliberately absent.
+        o.AllowAuthorizationCodeFlow()
+         .AllowRefreshTokenFlow()
+         .AllowClientCredentialsFlow();
+
+        // ADR-0001/0011: PKCE mandatory; OpenIddict enforces S256.
+        o.RequireProofKeyForCodeExchange();
+
+        o.RegisterScopes(Scopes.OpenId, Scopes.Email, Scopes.Profile, Scopes.OfflineAccess, "api");
+
+        // Lifetimes (threat T3) + rolling refresh with reuse leeway (ADR-0007).
+        o.SetAccessTokenLifetime(TimeSpan.FromMinutes(cfg.GetValue("Oidc:AccessTokenLifetimeMinutes", 10)));
+        o.SetRefreshTokenLifetime(TimeSpan.FromDays(cfg.GetValue("Oidc:RefreshTokenLifetimeDays", 14)));
+        o.SetRefreshTokenReuseLeeway(TimeSpan.FromSeconds(cfg.GetValue("Oidc:RefreshReuseLeewaySeconds", 15)));
+
+        // ADR-0004: standard, verifiable JWT access tokens (no encryption).
+        o.DisableAccessTokenEncryption();
+
+        // ADR-0007: rolling refresh tokens with server-side records so reuse is detectable;
+        // the handler escalates a detected reuse to family-wide revocation (threat T4).
+        o.UseReferenceRefreshTokens();
+        o.AddEventHandler<OpenIddictServerEvents.ProcessAuthenticationContext>(
+            b => b.UseScopedHandler<RefreshReuseHandler>());
+
+        // ADR-0009 (when supported by your OpenIddict version): require PAR + DPoP per client.
+        // o.RequirePushedAuthorizationRequests();
+
+        // Signing keys are injected lazily by SigningOptionsSetup (Dev or KMS).
+        var aspnet = o.UseAspNetCore()
+         .EnableAuthorizationEndpointPassthrough()   // our AuthorizeController handles login/consent
+         .EnableTokenEndpointPassthrough()           // our TokenController augments token issuance
+         .EnableUserInfoEndpointPassthrough()
+         .EnableEndSessionEndpointPassthrough();
+
+        // Dev only: allow plain HTTP. NEVER do this in production (ADR/threat model).
+        if (builder.Environment.IsDevelopment())
+            aspnet.DisableTransportSecurityRequirement();
+    })
+    .AddValidation(o => { o.UseLocalServer(); o.UseAspNetCore(); });
+
+// KMS / Dev signing credentials (ADR-0005).
+builder.Services.AddSingleton<IConfigureOptions<OpenIddictServerOptions>, SigningOptionsSetup>();
+if (cfg["Oidc:Signing:Mode"]?.Equals("Kms", StringComparison.OrdinalIgnoreCase) == true)
+{
+    builder.Services.AddSingleton<Amazon.KeyManagementService.IAmazonKeyManagementService>(
+        _ => new Amazon.KeyManagementService.AmazonKeyManagementServiceClient(
+            Amazon.RegionEndpoint.GetBySystemName(cfg["Oidc:Signing:Kms:Region"] ?? "us-east-1")));
+    builder.Services.AddHostedService<KeyRotationService>();   // 3-state rotation (ADR-0005)
+}
+
+builder.Services.AddControllersWithViews();
+
+var app = builder.Build();
+
+// Honor X-Forwarded-Proto/Host from a TLS-terminating reverse proxy so the discovery
+// issuer + endpoint URLs are correct (https) behind nginx/ingress (also lets OpenIddict
+// see the external https origin). Dev trusts any proxy; prod should pin KnownProxies.
+var fwd = new Microsoft.AspNetCore.Builder.ForwardedHeadersOptions
+{
+    ForwardedHeaders = Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedFor
+                     | Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedProto
+                     | Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedHost,
+};
+if (app.Environment.IsDevelopment()) { fwd.KnownNetworks.Clear(); fwd.KnownProxies.Clear(); }
+app.UseForwardedHeaders(fwd);
+
+// Security headers, incl. clickjacking defense for login/consent UI (threat T14).
+app.Use(async (ctx, next) =>
+{
+    ctx.Response.Headers["Content-Security-Policy"] = "frame-ancestors 'none'";
+    ctx.Response.Headers["X-Frame-Options"] = "DENY";
+    ctx.Response.Headers["X-Content-Type-Options"] = "nosniff";
+    await next();
+});
+
+app.UseAuthentication();
+app.UseAuthorization();
+app.MapControllers();
+
+// Dev convenience: migrate + seed a demo client/user/signing key.
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<AuthDbContext>();
+    // Dev: create schema from the model directly. Production: generate EF migrations
+    // (`dotnet ef migrations add Initial`) and call MigrateAsync() instead — see README.
+    if (app.Environment.IsDevelopment())
+        await db.Database.EnsureCreatedAsync();
+    else
+        await db.Database.MigrateAsync();
+    await DbSeeder.SeedAsync(scope.ServiceProvider, app.Configuration);
+}
+
+app.Run();
+
+// Exposed so the integration-test host (WebApplicationFactory<Program>) can boot the app.
+public partial class Program { }

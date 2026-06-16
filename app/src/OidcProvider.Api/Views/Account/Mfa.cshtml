@@ -1,0 +1,14 @@
+@model MfaViewModel
+@{ ViewData["Title"] = "Two-factor"; }
+
+<h1>Two-factor authentication</h1>
+<p class="muted">Enter the 6-digit code from your authenticator app.</p>
+@if (!string.IsNullOrEmpty(Model.Error)) { <p class="err">@Model.Error</p> }
+
+<form method="post" action="/account/mfa">
+    @Html.AntiForgeryToken()
+    <input type="hidden" name="returnUrl" value="@Model.ReturnUrl" />
+    <label for="code">Authentication code</label>
+    <input type="text" id="code" name="code" inputmode="numeric" autocomplete="one-time-code" autofocus />
+    <button type="submit">Verify</button>
+</form>
