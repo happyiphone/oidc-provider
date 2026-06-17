@@ -1,4 +1,7 @@
+using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using OidcProvider.Api;
@@ -45,6 +48,7 @@ builder.Services.AddScoped<IConsentStore, ConsentStore>();
 builder.Services.AddScoped<IUserService, UserService>();
 builder.Services.AddScoped<ISigningKeyStore, EfSigningKeyStore>();
 builder.Services.AddScoped<IOpenIddictTokenManagerFacade, TokenFamilyFacade>();
+builder.Services.AddScoped<IAuditLog, EfAuditLog>();          // threat T16 — tamper-evident audit
 builder.Services.AddSingleton<IUserSession, RedisUserSession>();
 builder.Services.AddSingleton<ITotpService, TotpService>();
 builder.Services.AddSingleton(new WebAuthnConfig
@@ -132,6 +136,29 @@ if (cfg["Oidc:Signing:Mode"]?.Equals("Kms", StringComparison.OrdinalIgnoreCase) 
 
 builder.Services.AddControllersWithViews();
 
+// Liveness/readiness probes. Readiness pings Postgres + Redis (fail closed if either is down).
+builder.Services.AddHealthChecks()
+    .AddCheck<ReadinessCheck>("ready", tags: ["ready"]);
+
+// Rate limiting on the abuse-prone endpoints (threat T15). Per-IP fixed window on /token
+// and /par only; everything else is unlimited. Reject with 429.
+var rateLimit = cfg.GetValue("Oidc:RateLimit:PerMinute",
+    builder.Environment.IsDevelopment() ? 100_000 : 60);
+builder.Services.AddRateLimiter(o =>
+{
+    o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    o.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(ctx =>
+    {
+        var path = ctx.Request.Path;
+        if (path.StartsWithSegments("/token") || path.StartsWithSegments("/par"))
+            return RateLimitPartition.GetFixedWindowLimiter(
+                ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                _ => new FixedWindowRateLimiterOptions
+                { PermitLimit = rateLimit, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 });
+        return RateLimitPartition.GetNoLimiter("unlimited");
+    });
+});
+
 var app = builder.Build();
 
 // Honor X-Forwarded-Proto/Host from a TLS-terminating reverse proxy so the discovery
@@ -155,9 +182,14 @@ app.Use(async (ctx, next) =>
     await next();
 });
 
+app.UseRateLimiter();          // /token + /par per-IP limit (threat T15)
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
+
+// Liveness: process is up. Readiness: dependencies reachable (fail closed).
+app.MapHealthChecks("/health/live", new() { Predicate = _ => false });
+app.MapHealthChecks("/health/ready", new() { Predicate = c => c.Tags.Contains("ready") });
 
 // Dev convenience: migrate + seed a demo client/user/signing key.
 using (var scope = app.Services.CreateScope())

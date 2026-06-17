@@ -1,3 +1,4 @@
+using OidcProvider.Core.Services;
 using OpenIddict.Abstractions;
 using static OpenIddict.Abstractions.OpenIddictConstants;
 
@@ -10,10 +11,11 @@ public sealed class TokenFamilyFacade : IOpenIddictTokenManagerFacade
 {
     private readonly IOpenIddictTokenManager _tokens;
     private readonly IOpenIddictAuthorizationManager _authorizations;
+    private readonly IAuditLog _audit;
 
     public TokenFamilyFacade(IOpenIddictTokenManager tokens,
-                             IOpenIddictAuthorizationManager authorizations)
-        => (_tokens, _authorizations) = (tokens, authorizations);
+                             IOpenIddictAuthorizationManager authorizations, IAuditLog audit)
+        => (_tokens, _authorizations, _audit) = (tokens, authorizations, audit);
 
     // Reuse of a redeemed refresh token detected → kill the entire family.
     public async Task RevokeFamilyAsync(string authorizationId, CancellationToken ct = default)
@@ -23,6 +25,8 @@ public sealed class TokenFamilyFacade : IOpenIddictTokenManagerFacade
         await _authorizations.TryRevokeAsync(auth, ct);             // marks authorization revoked
         await foreach (var token in _tokens.FindByAuthorizationIdAsync(authorizationId, ct))
             await _tokens.TryRevokeAsync(token, ct);                // and every token under it
+        await _audit.WriteAsync("family.revoked", clientId: await _authorizations.GetApplicationIdAsync(auth, ct),
+            detail: new { authorizationId }, ct: ct);               // threat T16
     }
 
     // Credential change → revoke every authorization for the subject (tree (c) / AC-c-1).

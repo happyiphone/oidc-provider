@@ -28,11 +28,13 @@ public sealed class AuthorizeController : Controller
     private readonly IPairwiseSubjects _ppid;
     private readonly AuthDbContext _db;
     private readonly IAntiforgery _antiforgery;
+    private readonly IAuditLog _audit;
 
     public AuthorizeController(IUserSession sessions, IUserService users,
-        IConsentStore consents, IPairwiseSubjects ppid, AuthDbContext db, IAntiforgery antiforgery)
-        => (_sessions, _users, _consents, _ppid, _db, _antiforgery)
-           = (sessions, users, consents, ppid, db, antiforgery);
+        IConsentStore consents, IPairwiseSubjects ppid, AuthDbContext db, IAntiforgery antiforgery,
+        IAuditLog audit)
+        => (_sessions, _users, _consents, _ppid, _db, _antiforgery, _audit)
+           = (sessions, users, consents, ppid, db, antiforgery, audit);
 
     [HttpGet("/authorize"), HttpPost("/authorize")]
     [IgnoreAntiforgeryToken] // CSRF defense here is the mandatory `state` param (T5)
@@ -109,6 +111,8 @@ public sealed class AuthorizeController : Controller
             if (Request.Form["submit"] != "accept")
                 return Reject(Errors.AccessDenied, "User denied consent.");
             await _consents.RecordAsync(user.Id, request.ClientId!, requested);
+            await _audit.WriteAsync("consent.granted", user.Id, request.ClientId,
+                new { scopes = requested.ToArray() });
         }
 
         // --- IssueCode: build the principal OpenIddict mints the code from ---

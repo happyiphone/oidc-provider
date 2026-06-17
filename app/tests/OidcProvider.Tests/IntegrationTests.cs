@@ -5,7 +5,9 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using OidcProvider.Core.Services;
 using Xunit;
 
 namespace OidcProvider.Tests;
@@ -127,6 +129,21 @@ public sealed class IntegrationTests : IClassFixture<OidcAppFactory>
         var tok = await ExchangeCodeAsync(c, code, verifier);
         var claims = DecodeJwt(tok.GetProperty("id_token").GetString()!);
         Assert.Equal("Alice Example", claims.GetProperty("name").GetString());
+    }
+
+    [Fact] // CR #4: concurrent first derivation for one (user, sector) must not throw (PK race)
+    public async Task Pairwise_subject_concurrent_first_use_is_safe()
+    {
+        var userId = Guid.NewGuid();
+        var sector = "race-" + Guid.NewGuid().ToString("n")[..8];
+        async Task<string> Derive()
+        {
+            using var scope = _factory.Services.CreateScope();
+            return await scope.ServiceProvider.GetRequiredService<IPairwiseSubjects>()
+                .ForAsync(userId, sector);
+        }
+        var results = await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => Derive()));
+        Assert.All(results, r => Assert.Equal(results[0], r)); // all identical; none threw
     }
 
     // ---------- abuse cases (AC-*) ----------
