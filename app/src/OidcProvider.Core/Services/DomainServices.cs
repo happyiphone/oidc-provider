@@ -196,6 +196,10 @@ public interface IUserService
 {
     Task<AppUser?> ValidatePasswordAsync(string username, string password, CancellationToken ct = default);
     Task<AppUser?> GetAsync(Guid id, CancellationToken ct = default);
+    Task<AppUser?> FindByEmailAsync(string email, CancellationToken ct = default);
+    Task<AppUser?> CreateUserAsync(string username, string email, string password, CancellationToken ct = default);
+    Task MarkEmailVerifiedAsync(Guid userId, CancellationToken ct = default);
+    Task ResetPasswordAsync(Guid userId, string newPassword, CancellationToken ct = default);
     Task<bool> ChangePasswordAsync(Guid userId, string current, string newPassword, CancellationToken ct = default);
     Task RevokeAllForUserAsync(Guid userId, CancellationToken ct = default); // credential change (tree c)
     Task SaveAsync(CancellationToken ct = default);                          // persist tracked changes
@@ -220,6 +224,39 @@ public sealed class UserService : IUserService
 
     public Task<AppUser?> GetAsync(Guid id, CancellationToken ct = default)
         => _db.Users.Include(x => x.MfaMethods).FirstOrDefaultAsync(x => x.Id == id, ct);
+
+    public Task<AppUser?> FindByEmailAsync(string email, CancellationToken ct = default)
+        => _db.Users.FirstOrDefaultAsync(x => x.Email == email && x.IsActive, ct);
+
+    public async Task<AppUser?> CreateUserAsync(string username, string email, string password, CancellationToken ct = default)
+    {
+        if (password.Length < 8) return null;
+        if (await _db.Users.AnyAsync(x => x.Username == username || x.Email == email, ct)) return null; // taken
+        var u = new AppUser
+        {
+            Username = username, Email = email, EmailVerified = false, IsActive = true,
+            PasswordHash = Hash(password), ProfileClaimsJson = "{}",
+        };
+        _db.Users.Add(u);
+        try { await _db.SaveChangesAsync(ct); }
+        catch (DbUpdateException) { return null; } // unique race
+        return u;
+    }
+
+    public async Task MarkEmailVerifiedAsync(Guid userId, CancellationToken ct = default)
+    {
+        var u = await _db.Users.FindAsync(new object[] { userId }, ct);
+        if (u is not null && !u.EmailVerified) { u.EmailVerified = true; await _db.SaveChangesAsync(ct); }
+    }
+
+    public async Task ResetPasswordAsync(Guid userId, string newPassword, CancellationToken ct = default)
+    {
+        var u = await _db.Users.FindAsync(new object[] { userId }, ct);
+        if (u is null) return;
+        u.PasswordHash = Hash(newPassword);
+        await _db.SaveChangesAsync(ct);
+        await RevokeAllForUserAsync(userId, ct);   // a reset invalidates everything (tree (c))
+    }
 
     // Verify current password, set the new one, then revoke everything (tokens + sessions)
     // issued under the old credential. Caller re-establishes the current device's session.

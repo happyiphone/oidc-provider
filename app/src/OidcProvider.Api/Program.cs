@@ -57,6 +57,8 @@ builder.Services.AddScoped<IAuditLog, EfAuditLog>();          // threat T16 — 
 builder.Services.AddSingleton<IUserSession, RedisUserSession>();
 builder.Services.AddSingleton<ILoginThrottle, RedisLoginThrottle>();   // brute-force lockout
 builder.Services.AddSingleton<IDpopValidator, DpopValidator>();        // DPoP (RFC 9449)
+builder.Services.AddSingleton<ITokenLinkStore, RedisTokenLinkStore>(); // email-verify / reset links
+builder.Services.AddSingleton<IEmailSender, DevEmailSender>();         // PROD: swap for SMTP/provider
 builder.Services.AddSingleton<ITotpService, TotpService>();
 builder.Services.AddSingleton(new WebAuthnConfig
 {
@@ -256,6 +258,11 @@ app.MapControllers();
 // Liveness: process is up. Readiness: dependencies reachable (fail closed).
 app.MapHealthChecks("/health/live", new() { Predicate = _ => false });
 app.MapHealthChecks("/health/ready", new() { Predicate = c => c.Tags.Contains("ready") });
+
+// Dev-only: read the last email captured by the sink (drives signup/verify/reset flows).
+if (app.Environment.IsDevelopment())
+    app.MapGet("/dev/emails/{address}", (string address) =>
+        DevEmailSender.LastBody(address) is { } b ? Results.Text(b) : Results.NotFound());
 
 // Dev convenience: migrate + seed a demo client/user/signing key.
 using (var scope = app.Services.CreateScope())

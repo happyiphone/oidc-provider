@@ -371,6 +371,32 @@ public sealed class IntegrationTests : IClassFixture<OidcAppFactory>
         Assert.Contains("access_token", await tok.Content.ReadAsStringAsync());
     }
 
+    [Fact] // onboarding: signup → verify → forgot → reset (link tokens single-use)
+    public async Task Signup_verify_and_reset_flow()
+    {
+        var c = NewClient();
+        var uniq = Guid.NewGuid().ToString("n")[..10];
+        var email = $"u{uniq}@example.com";
+
+        Assert.Equal(HttpStatusCode.OK, (await c.PostAsync("/account/signup", Form(new()
+        { ["username"] = $"u{uniq}", ["email"] = email, ["password"] = "initialPass1!" }))).StatusCode);
+
+        var vbody = await c.GetStringAsync($"/dev/emails/{Uri.EscapeDataString(email)}");
+        var vtok = Regex.Match(vbody, "token=([A-Za-z0-9_-]+)").Groups[1].Value;
+        Assert.Equal(HttpStatusCode.OK, (await c.GetAsync($"/account/verify?token={vtok}")).StatusCode);
+
+        await c.PostAsync("/account/forgot-password", Form(new() { ["email"] = email }));
+        var rbody = await c.GetStringAsync($"/dev/emails/{Uri.EscapeDataString(email)}");
+        var rtok = Regex.Match(rbody, "reset-password\\?token=([A-Za-z0-9_-]+)").Groups[1].Value;
+        Assert.Equal(HttpStatusCode.OK, (await c.PostAsync("/account/reset-password", Form(new()
+        { ["token"] = rtok, ["newPassword"] = "brandNewPass2!" }))).StatusCode);
+
+        // reset token is single-use
+        var reuse = await c.PostAsync("/account/reset-password", Form(new()
+        { ["token"] = rtok, ["newPassword"] = "another8x!" }));
+        Assert.Equal(HttpStatusCode.BadRequest, reuse.StatusCode);
+    }
+
     [Fact] // RFC 7523: a private_key_jwt assertion's jti is single-use (replay rejected)
     public async Task ClientAssertion_jti_replay_is_rejected()
     {
