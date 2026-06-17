@@ -67,7 +67,17 @@ public sealed class AuthorizeController : Controller
         }
 
         var user = await _users.GetAsync(session.UserId);
-        if (user is null) return Reject(Errors.AccessDenied, "Unknown user.");
+        if (user is null)
+        {
+            // Stale session: the user no longer exists (e.g. after a data reset). Clear it
+            // and re-authenticate rather than dead-ending with an error.
+            if (sid is not null) await _sessions.RevokeAsync(sid);
+            await HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+            if (promptNone) return Reject(Errors.LoginRequired, "Re-authentication required.");
+            return Challenge(
+                authenticationSchemes: CookieAuthenticationDefaults.AuthenticationScheme,
+                properties: new AuthenticationProperties { RedirectUri = Request.Path + Request.QueryString });
+        }
 
         // --- StepUp (acr / MFA) ---
         var requiredAcr = AcrPolicy.Resolve(request.GetAcrValues(), user.MfaMethods.Count > 0);
