@@ -26,8 +26,16 @@ public static class DbSeeder
                 ClientType = ClientTypes.Confidential,
                 ConsentType = ConsentTypes.Explicit,
                 DisplayName = "Demo Web App",
-                RedirectUris = { new Uri("http://localhost:5000/callback") }, // EXACT match (T2/T12)
-                PostLogoutRedirectUris = { new Uri("http://localhost:5000/signed-out") },
+                RedirectUris =   // EXACT match (T2/T12); 5000 for tests, 5050 for the demo RP
+                {
+                    new Uri("http://localhost:5000/callback"),
+                    new Uri("http://localhost:5050/callback"),
+                },
+                PostLogoutRedirectUris =
+                {
+                    new Uri("http://localhost:5000/signed-out"),
+                    new Uri("http://localhost:5050/signed-out"),
+                },
                 Permissions =
                 {
                     Permissions.Endpoints.Authorization,
