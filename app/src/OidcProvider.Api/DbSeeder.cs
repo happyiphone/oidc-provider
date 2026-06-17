@@ -27,11 +27,13 @@ public static class DbSeeder
                 ConsentType = ConsentTypes.Explicit,
                 DisplayName = "Demo Web App",
                 RedirectUris = { new Uri("http://localhost:5000/callback") }, // EXACT match (T2/T12)
+                PostLogoutRedirectUris = { new Uri("http://localhost:5000/signed-out") },
                 Permissions =
                 {
                     Permissions.Endpoints.Authorization,
                     Permissions.Endpoints.Token,
                     Permissions.Endpoints.PushedAuthorization, // RFC 9126 (ADR-0009)
+                    Permissions.Endpoints.EndSession,          // RP-initiated logout
                     Permissions.GrantTypes.AuthorizationCode,
                     Permissions.GrantTypes.RefreshToken,
                     Permissions.ResponseTypes.Code,

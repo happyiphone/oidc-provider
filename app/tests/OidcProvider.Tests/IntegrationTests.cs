@@ -252,6 +252,25 @@ public sealed class IntegrationTests : IClassFixture<OidcAppFactory>
         Assert.Contains("invalid_dpop_proof", await res.Content.ReadAsStringAsync());
     }
 
+    [Fact] // RP-initiated logout: redirect to a registered URI + session terminated
+    public async Task RpInitiated_logout_redirects_and_clears_session()
+    {
+        var c = NewClient();
+        var (verifier, challenge) = Pkce();
+        await LoginAsync(c, "alice", "password123!");
+        var code = await GetCodeAsync(c, "openid", challenge, "lo");
+        var idt = (await ExchangeCodeAsync(c, code, verifier)).GetProperty("id_token").GetString();
+
+        var res = await c.GetAsync($"/logout?id_token_hint={idt}" +
+            $"&post_logout_redirect_uri={Uri.EscapeDataString("http://localhost:5000/signed-out")}&state=xyz");
+        Assert.Equal(HttpStatusCode.Redirect, res.StatusCode);
+        Assert.Contains("signed-out", res.Headers.Location!.ToString());
+
+        var after = await c.GetAsync("/account/consents");   // session gone → bounce to login
+        Assert.Equal(HttpStatusCode.Redirect, after.StatusCode);
+        Assert.Contains("/account/login", after.Headers.Location!.ToString());
+    }
+
     [Fact] // consent management: list + revoke → app must re-consent
     public async Task Consent_can_be_listed_and_revoked()
     {
