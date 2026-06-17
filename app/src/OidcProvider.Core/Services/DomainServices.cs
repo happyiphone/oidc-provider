@@ -205,21 +205,33 @@ public sealed class UserService : IUserService
         await _tokens.RevokeAllForSubjectAsync(userId.ToString(), ct);
     }
 
+    // Argon2id (OWASP-recommended). Params: 64 MiB, 3 passes, parallelism 4 — a reasonable
+    // interactive-login baseline. Stored as argon2id$m=..,t=..,p=..$salt$hash (PHC-ish).
+    private const int MemKiB = 65536, Iterations = 3, Parallelism = 4, HashLen = 32;
+
     public static string Hash(string password)
     {
         var salt = RandomNumberGenerator.GetBytes(16);
-        var key = KeyDerivation.Pbkdf2(password, salt, KeyDerivationPrf.HMACSHA256, 210_000, 32);
-        return $"pbkdf2$210000${Convert.ToBase64String(salt)}${Convert.ToBase64String(key)}";
+        var hash = Argon2(password, salt, MemKiB, Iterations, Parallelism, HashLen);
+        return $"argon2id$m={MemKiB},t={Iterations},p={Parallelism}$" +
+               $"{Convert.ToBase64String(salt)}${Convert.ToBase64String(hash)}";
     }
 
     private static bool Verify(string password, string stored)
     {
         var p = stored.Split('$');
-        if (p.Length != 4 || p[0] != "pbkdf2") return false;
+        if (p.Length != 4 || p[0] != "argon2id") return false;
+        var prm = p[1].Split(',').Select(kv => int.Parse(kv.Split('=')[1])).ToArray(); // m,t,p
         var salt = Convert.FromBase64String(p[2]);
         var expected = Convert.FromBase64String(p[3]);
-        var actual = KeyDerivation.Pbkdf2(password, salt, KeyDerivationPrf.HMACSHA256,
-            int.Parse(p[1]), expected.Length);
+        var actual = Argon2(password, salt, prm[0], prm[1], prm[2], expected.Length);
         return CryptographicOperations.FixedTimeEquals(actual, expected);
+    }
+
+    private static byte[] Argon2(string password, byte[] salt, int memKiB, int iters, int par, int len)
+    {
+        using var a = new Konscious.Security.Cryptography.Argon2id(Encoding.UTF8.GetBytes(password))
+        { Salt = salt, MemorySize = memKiB, Iterations = iters, DegreeOfParallelism = par };
+        return a.GetBytes(len);
     }
 }

@@ -50,6 +50,7 @@ builder.Services.AddScoped<ISigningKeyStore, EfSigningKeyStore>();
 builder.Services.AddScoped<IOpenIddictTokenManagerFacade, TokenFamilyFacade>();
 builder.Services.AddScoped<IAuditLog, EfAuditLog>();          // threat T16 — tamper-evident audit
 builder.Services.AddSingleton<IUserSession, RedisUserSession>();
+builder.Services.AddSingleton<ILoginThrottle, RedisLoginThrottle>();   // brute-force lockout
 builder.Services.AddSingleton<ITotpService, TotpService>();
 builder.Services.AddSingleton(new WebAuthnConfig
 {

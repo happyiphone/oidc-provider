@@ -19,9 +19,10 @@ public sealed class AccountController : Controller
     private readonly IUserSession _sessions;
     private readonly ITotpService _totp;
     private readonly IWebAuthnService _webauthn;
+    private readonly ILoginThrottle _throttle;
     public AccountController(IUserService users, IUserSession sessions,
-        ITotpService totp, IWebAuthnService webauthn)
-        => (_users, _sessions, _totp, _webauthn) = (users, sessions, totp, webauthn);
+        ITotpService totp, IWebAuthnService webauthn, ILoginThrottle throttle)
+        => (_users, _sessions, _totp, _webauthn, _throttle) = (users, sessions, totp, webauthn, throttle);
 
     [HttpGet("/account/login")]
     public IActionResult LoginPage([FromQuery] string? returnUrl)
@@ -31,9 +32,18 @@ public sealed class AccountController : Controller
     public async Task<IActionResult> Login(
         [FromForm] string? username, [FromForm] string? password, [FromForm] string? returnUrl)
     {
+        var throttleKey = username ?? "";
+        // Brute-force lockout: refuse once too many recent failures, even with the right password.
+        if (await _throttle.IsLockedAsync(throttleKey))
+            return View("Login", new LoginViewModel { ReturnUrl = returnUrl, Error = "Too many attempts. Try again later." });
+
         var user = await _users.ValidatePasswordAsync(username ?? "", password ?? "");
         if (user is null)
+        {
+            await _throttle.RecordFailureAsync(throttleKey);
             return View("Login", new LoginViewModel { ReturnUrl = returnUrl, Error = "Invalid credentials." });
+        }
+        await _throttle.ResetAsync(throttleKey);   // clear the counter on success
 
         if (user.MfaMethods.Count > 0)
         {
