@@ -252,6 +252,39 @@ public sealed class IntegrationTests : IClassFixture<OidcAppFactory>
         Assert.Contains("invalid_dpop_proof", await res.Content.ReadAsStringAsync());
     }
 
+    [Fact] // RFC 7591: open registration is gated by the initial access token
+    public async Task Register_without_initial_access_token_is_rejected()
+    {
+        var res = await NewClient().PostAsync("/register",
+            new StringContent("{\"grant_types\":[\"client_credentials\"]}", Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.Unauthorized, res.StatusCode);
+    }
+
+    [Fact] // RFC 7591: register a client, then use it
+    public async Task Register_then_client_credentials_works()
+    {
+        var c = NewClient();
+        var req = new HttpRequestMessage(HttpMethod.Post, "/register")
+        {
+            Content = new StringContent(
+                "{\"client_name\":\"t\",\"grant_types\":[\"client_credentials\"],\"scope\":\"api\"}",
+                Encoding.UTF8, "application/json"),
+        };
+        req.Headers.Add("Authorization", "Bearer dev-initial-access-token");
+        var res = await c.SendAsync(req);
+        Assert.Equal(HttpStatusCode.Created, res.StatusCode);
+        var reg = JsonDocument.Parse(await res.Content.ReadAsStringAsync()).RootElement;
+
+        var tok = await c.PostAsync("/token", Form(new()
+        {
+            ["grant_type"] = "client_credentials", ["scope"] = "api",
+            ["client_id"] = reg.GetProperty("client_id").GetString()!,
+            ["client_secret"] = reg.GetProperty("client_secret").GetString()!,
+        }));
+        Assert.Equal(HttpStatusCode.OK, tok.StatusCode);
+        Assert.Contains("access_token", await tok.Content.ReadAsStringAsync());
+    }
+
     private static (string proof, string jkt) DpopProof(string htm, string htu)
     {
         using var ec = ECDsa.Create(ECCurve.NamedCurves.nistP256);
