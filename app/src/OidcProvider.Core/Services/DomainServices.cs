@@ -199,6 +199,7 @@ public interface IUserService
     Task<AppUser?> FindByEmailAsync(string email, CancellationToken ct = default);
     Task<AppUser?> CreateUserAsync(string username, string email, string password, CancellationToken ct = default);
     Task MarkEmailVerifiedAsync(Guid userId, CancellationToken ct = default);
+    Task<AppUser> FindOrCreateFederatedAsync(string email, string externalSubject, CancellationToken ct = default);
     Task ResetPasswordAsync(Guid userId, string newPassword, CancellationToken ct = default);
     Task<bool> ChangePasswordAsync(Guid userId, string current, string newPassword, CancellationToken ct = default);
     Task RevokeAllForUserAsync(Guid userId, CancellationToken ct = default); // credential change (tree c)
@@ -240,6 +241,23 @@ public sealed class UserService : IUserService
         _db.Users.Add(u);
         try { await _db.SaveChangesAsync(ct); }
         catch (DbUpdateException) { return null; } // unique race
+        return u;
+    }
+
+    // Federated login: link to an existing account by verified email, else provision a
+    // password-less account (email already proven by the external IdP).
+    public async Task<AppUser> FindOrCreateFederatedAsync(string email, string externalSubject, CancellationToken ct = default)
+    {
+        var u = await _db.Users.FirstOrDefaultAsync(x => x.Email == email, ct);
+        if (u is not null) return u;
+        u = new AppUser
+        {
+            Username = email, Email = email, EmailVerified = true, IsActive = true,
+            PasswordHash = null, ProfileClaimsJson = "{}",
+        };
+        _db.Users.Add(u);
+        try { await _db.SaveChangesAsync(ct); }
+        catch (DbUpdateException) { _db.ChangeTracker.Clear(); return await _db.Users.FirstAsync(x => x.Email == email, ct); }
         return u;
     }
 

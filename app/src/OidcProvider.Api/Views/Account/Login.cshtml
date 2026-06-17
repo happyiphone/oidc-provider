@@ -13,4 +13,10 @@
     <input type="password" id="password" name="password" autocomplete="current-password" />
     <button type="submit">Continue</button>
 </form>
+@if (!string.IsNullOrEmpty(Model.FederationName))
+{
+    <p style="margin-top:1rem">
+        <a href="/account/external-login?returnUrl=@Uri.EscapeDataString(Model.ReturnUrl ?? "/")">Log in with @Model.FederationName</a>
+    </p>
+}
 <p class="muted">Demo: <code>alice / password123!</code> &middot; <code>bob / password123!</code> (TOTP)</p>

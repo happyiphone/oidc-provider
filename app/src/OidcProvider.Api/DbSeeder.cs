@@ -144,6 +144,32 @@ public static class DbSeeder
             });
         }
 
+        // Loopback IdP client — lets the provider federate to ITSELF for dev/demo of the
+        // external-login flow (its redirect is the OIDC handler's callback path).
+        const string fed = "federation-loopback";
+        if (await apps.FindByClientIdAsync(fed) is null)
+        {
+            await apps.CreateAsync(new OpenIddictApplicationDescriptor
+            {
+                ClientId = fed,
+                ClientSecret = "fed-secret-dev-only",
+                ClientType = ClientTypes.Confidential,
+                ConsentType = ConsentTypes.Implicit,   // first-party loopback: skip the consent screen
+                DisplayName = "Federation loopback",
+                RedirectUris = { new Uri("http://localhost:8081/signin-oidc-external") },
+                Permissions =
+                {
+                    Permissions.Endpoints.Authorization, Permissions.Endpoints.Token,
+                    Permissions.Endpoints.PushedAuthorization, // the .NET OIDC handler uses PAR
+                    Permissions.GrantTypes.AuthorizationCode,
+                    Permissions.ResponseTypes.Code,
+                    Permissions.Prefixes.Scope + "openid",
+                    Permissions.Scopes.Email, Permissions.Scopes.Profile, // OIDC handler requests profile
+                },
+                Requirements = { Requirements.Features.ProofKeyForCodeExchange },
+            });
+        }
+
         // private_key_jwt client (RFC 7523 asymmetric client auth, no shared secret).
         const string pkjwt = "svc-pkjwt";
         if (await apps.FindByClientIdAsync(pkjwt) is null)

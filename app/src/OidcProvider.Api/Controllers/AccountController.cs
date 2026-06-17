@@ -22,14 +22,46 @@ public sealed class AccountController : Controller
     private readonly ILoginThrottle _throttle;
     private readonly IConsentStore _consents;
     private readonly IAuditLog _audit;
+    private readonly IConfiguration _cfg;
     public AccountController(IUserService users, IUserSession sessions, ITotpService totp,
-        IWebAuthnService webauthn, ILoginThrottle throttle, IConsentStore consents, IAuditLog audit)
-        => (_users, _sessions, _totp, _webauthn, _throttle, _consents, _audit)
-           = (users, sessions, totp, webauthn, throttle, consents, audit);
+        IWebAuthnService webauthn, ILoginThrottle throttle, IConsentStore consents, IAuditLog audit,
+        IConfiguration cfg)
+        => (_users, _sessions, _totp, _webauthn, _throttle, _consents, _audit, _cfg)
+           = (users, sessions, totp, webauthn, throttle, consents, audit, cfg);
 
     [HttpGet("/account/login")]
     public IActionResult LoginPage([FromQuery] string? returnUrl)
-        => View("Login", new LoginViewModel { ReturnUrl = returnUrl });
+        => View("Login", new LoginViewModel
+        {
+            ReturnUrl = returnUrl,
+            FederationName = _cfg["Oidc:Federation:DisplayName"],   // null/empty → no external button
+        });
+
+    // ---- Federation: log in via an external OIDC IdP ----
+    [HttpGet("/account/external-login")]
+    public IActionResult ExternalLogin([FromQuery] string? returnUrl)
+    {
+        if (string.IsNullOrEmpty(_cfg["Oidc:Federation:Authority"])) return NotFound();
+        var redirect = $"/account/external-callback?returnUrl={Uri.EscapeDataString(returnUrl ?? "/")}";
+        return Challenge(new AuthenticationProperties { RedirectUri = redirect }, "oidc-external");
+    }
+
+    [HttpGet("/account/external-callback")]
+    public async Task<IActionResult> ExternalCallback([FromQuery] string? returnUrl)
+    {
+        var result = await HttpContext.AuthenticateAsync("External");
+        if (!result.Succeeded) return Redirect("/account/login");
+        var p = result.Principal!;
+        var email = p.FindFirst(System.Security.Claims.ClaimTypes.Email)?.Value ?? p.FindFirst("email")?.Value;
+        var sub = p.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? p.FindFirst("sub")?.Value;
+        if (string.IsNullOrEmpty(email)) return BadRequest("The external IdP did not return an email.");
+
+        var user = await _users.FindOrCreateFederatedAsync(email, sub ?? email);  // link by email
+        await HttpContext.SignOutAsync("External");
+        await EstablishSessionAsync(user.Id, AcrPolicy.Pwd, new[] { "ext" });
+        await _audit.WriteAsync("login.federated", user.Id);
+        return Redirect(returnUrl ?? "/");
+    }
 
     [HttpPost("/account/login"), ValidateAntiForgeryToken]
     public async Task<IActionResult> Login(

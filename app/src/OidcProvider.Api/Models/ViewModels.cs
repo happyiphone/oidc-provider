@@ -4,6 +4,7 @@ public sealed class LoginViewModel
 {
     public string? ReturnUrl { get; set; }
     public string? Error { get; set; }
+    public string? FederationName { get; set; }   // shows a "Log in with <name>" button when set
 }
 
 public sealed class MfaViewModel

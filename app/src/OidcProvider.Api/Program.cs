@@ -68,7 +68,7 @@ builder.Services.AddSingleton(new WebAuthnConfig
 builder.Services.AddSingleton<IWebAuthnService, WebAuthnService>();
 
 // ---- Cookie auth for the login/consent UI ----------------------------------
-builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+var authBuilder = builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
     .AddCookie(o =>
     {
         o.LoginPath = "/account/login";
@@ -78,6 +78,30 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
         o.Cookie.SecurePolicy = builder.Environment.IsDevelopment()
             ? CookieSecurePolicy.SameAsRequest : CookieSecurePolicy.Always;
     });
+
+// ---- Federation: log in via an external OIDC IdP (enabled when an authority is set) ----
+var fedAuthority = cfg["Oidc:Federation:Authority"];
+if (!string.IsNullOrEmpty(fedAuthority))
+{
+    authBuilder
+        .AddCookie("External")   // short-lived scheme holding the external sign-in
+        .AddOpenIdConnect("oidc-external", o =>
+        {
+            o.Authority = fedAuthority;
+            o.ClientId = cfg["Oidc:Federation:ClientId"];
+            o.ClientSecret = cfg["Oidc:Federation:ClientSecret"];
+            o.ResponseType = "code";
+            o.UsePkce = true;
+            o.SignInScheme = "External";
+            o.CallbackPath = "/signin-oidc-external";
+            o.SaveTokens = true;
+            o.Scope.Add("email");
+            o.GetClaimsFromUserInfoEndpoint = true;
+            o.PushedAuthorizationBehavior = Microsoft.AspNetCore.Authentication.OpenIdConnect
+                .PushedAuthorizationBehavior.Disable; // plain authorize (provider doesn't require PAR here)
+            o.RequireHttpsMetadata = !builder.Environment.IsDevelopment(); // dev: allow http authority
+        });
+}
 
 // ---- OpenIddict ------------------------------------------------------------
 builder.Services.AddOpenIddict()

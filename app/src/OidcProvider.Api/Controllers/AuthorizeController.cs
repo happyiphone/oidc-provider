@@ -29,12 +29,13 @@ public sealed class AuthorizeController : Controller
     private readonly AuthDbContext _db;
     private readonly IAntiforgery _antiforgery;
     private readonly IAuditLog _audit;
+    private readonly IOpenIddictApplicationManager _apps;
 
     public AuthorizeController(IUserSession sessions, IUserService users,
         IConsentStore consents, IPairwiseSubjects ppid, AuthDbContext db, IAntiforgery antiforgery,
-        IAuditLog audit)
-        => (_sessions, _users, _consents, _ppid, _db, _antiforgery, _audit)
-           = (sessions, users, consents, ppid, db, antiforgery, audit);
+        IAuditLog audit, IOpenIddictApplicationManager apps)
+        => (_sessions, _users, _consents, _ppid, _db, _antiforgery, _audit, _apps)
+           = (sessions, users, consents, ppid, db, antiforgery, audit, apps);
 
     [HttpGet("/authorize"), HttpPost("/authorize")]
     [IgnoreAntiforgeryToken] // CSRF defense here is the mandatory `state` param (T5)
@@ -85,7 +86,13 @@ public sealed class AuthorizeController : Controller
         // --- Consent (T8) ---
         var requested = request.GetScopes();
         var consent = await _consents.GetActiveAsync(user.Id, request.ClientId!);
-        var covered = consent is not null && requested.All(s => consent.ScopesGranted.Contains(s));
+        // First-party/trusted clients (ConsentType=Implicit) skip the prompt; others need a
+        // recorded grant covering the requested scopes.
+        var app = await _apps.FindByClientIdAsync(request.ClientId!);
+        var implicitConsent = app is not null &&
+            await _apps.GetConsentTypeAsync(app) == ConsentTypes.Implicit;
+        var covered = implicitConsent ||
+            (consent is not null && requested.All(s => consent.ScopesGranted.Contains(s)));
         if (!covered)
         {
             if (promptNone) return Reject(Errors.ConsentRequired, "User consent required.");
