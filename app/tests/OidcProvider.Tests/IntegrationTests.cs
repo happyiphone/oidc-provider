@@ -104,6 +104,31 @@ public sealed class IntegrationTests : IClassFixture<OidcAppFactory>
         Assert.Equal(sub, uiJson.GetProperty("sub").GetString());
     }
 
+    [Fact] // regression: email_verified must be a JSON boolean, not the string "True" (code review #1)
+    public async Task IdToken_email_verified_is_a_boolean()
+    {
+        var c = NewClient();
+        var (verifier, challenge) = Pkce();
+        await LoginAsync(c, "alice", "password123!");
+        var code = await GetCodeAsync(c, "openid email", challenge, "ev");
+        var tok = await ExchangeCodeAsync(c, code, verifier);
+        var ev = DecodeJwt(tok.GetProperty("id_token").GetString()!).GetProperty("email_verified");
+        Assert.True(ev.ValueKind is JsonValueKind.True or JsonValueKind.False, $"email_verified was {ev.ValueKind}");
+        Assert.True(ev.GetBoolean());
+    }
+
+    [Fact] // regression: profile scope must actually issue the name claim (code review #2)
+    public async Task ProfileScope_issues_name_claim()
+    {
+        var c = NewClient();
+        var (verifier, challenge) = Pkce();
+        await LoginAsync(c, "alice", "password123!");
+        var code = await GetCodeAsync(c, "openid profile", challenge, "pf");
+        var tok = await ExchangeCodeAsync(c, code, verifier);
+        var claims = DecodeJwt(tok.GetProperty("id_token").GetString()!);
+        Assert.Equal("Alice Example", claims.GetProperty("name").GetString());
+    }
+
     // ---------- abuse cases (AC-*) ----------
 
     [Fact] // AC-T1-1

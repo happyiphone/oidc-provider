@@ -42,7 +42,17 @@ public sealed class PairwiseSubjects : IPairwiseSubjects
 
         _db.SubjectIdentifiers.Add(new SubjectIdentifier
         { UserId = userId, SectorIdentifier = sector, Ppid = ppid });
-        await _db.SaveChangesAsync(ct);
+        try
+        {
+            await _db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException) // concurrent first login for the same (user, sector) [code review #4]
+        {
+            // The derivation is deterministic, so the winning row holds the same ppid.
+            _db.ChangeTracker.Clear();
+            var raced = await _db.SubjectIdentifiers.FindAsync(new object[] { userId, sector }, ct);
+            return raced?.Ppid ?? ppid;
+        }
         return ppid;
     }
 }

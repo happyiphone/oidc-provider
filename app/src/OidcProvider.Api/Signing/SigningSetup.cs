@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using Amazon.KeyManagementService;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using OidcProvider.Core.Entities;
@@ -28,7 +29,14 @@ public sealed class SigningOptionsSetup : IConfigureOptions<OpenIddictServerOpti
         // OIDF conformance suite, which flagged the metadata/policy mismatch).
         options.CodeChallengeMethods.Remove("plain");
 
-        if (_cfg.Mode.Equals("Dev", StringComparison.OrdinalIgnoreCase))
+        var isDev = _cfg.Mode.Equals("Dev", StringComparison.OrdinalIgnoreCase);
+        // Fail fast: the ephemeral in-process Dev signing key must never run outside
+        // Development (no KMS/HSM custody, no rotation, per-instance key). [security #2]
+        if (isDev && !_sp.GetRequiredService<IHostEnvironment>().IsDevelopment())
+            throw new InvalidOperationException(
+                "Oidc:Signing:Mode=Dev is not allowed outside Development. Set Mode=Kms.");
+
+        if (isDev)
         {
             var ecdsa = ECDsa.Create(ECCurve.NamedCurves.nistP256);
             options.SigningCredentials.Add(

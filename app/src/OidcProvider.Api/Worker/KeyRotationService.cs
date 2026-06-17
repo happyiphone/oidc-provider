@@ -5,6 +5,7 @@ using Microsoft.Extensions.Options;
 using OidcProvider.Api.Signing;
 using OidcProvider.Core.Entities;
 using OidcProvider.Core.Signing;
+using OpenIddict.Server;
 
 namespace OidcProvider.Api.Worker;
 
@@ -17,12 +18,14 @@ public sealed class KeyRotationService : BackgroundService
     private readonly IAmazonKeyManagementService _kms;
     private readonly OidcSigningConfig _cfg;
     private readonly ILogger<KeyRotationService> _log;
+    private readonly IOptionsMonitorCache<OpenIddictServerOptions> _optionsCache;
     private static readonly TimeSpan Interval = TimeSpan.FromHours(6);
     private static readonly TimeSpan MaxAccessTokenLifetime = TimeSpan.FromHours(1);
 
     public KeyRotationService(IServiceScopeFactory scopes, IAmazonKeyManagementService kms,
-        IOptions<OidcSigningConfig> cfg, ILogger<KeyRotationService> log)
-        => (_scopes, _kms, _cfg, _log) = (scopes, kms, cfg.Value, log);
+        IOptions<OidcSigningConfig> cfg, ILogger<KeyRotationService> log,
+        IOptionsMonitorCache<OpenIddictServerOptions> optionsCache)
+        => (_scopes, _kms, _cfg, _log, _optionsCache) = (scopes, kms, cfg.Value, log, optionsCache);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -63,7 +66,11 @@ public sealed class KeyRotationService : BackgroundService
         // 2. Promote once the propagation window has elapsed.
         if (next.NotBefore is { } nb && nb > DateTimeOffset.UtcNow) return;
         await store.PromoteAsync(next.Kid, ct);   // active→retired, next→active (AC-T7-2)
-        _log.LogInformation("Activated signing key {Kid}.", next.Kid);
+        // Invalidate the cached OpenIddict server options so the next resolution re-runs
+        // SigningOptionsSetup and signs with the newly-promoted key instead of the retired
+        // one (otherwise the in-memory SigningCredentials are frozen at startup). [code review #3]
+        _optionsCache.Clear();
+        _log.LogInformation("Activated signing key {Kid}; signing options invalidated.", next.Kid);
 
         // 3. Drop retired keys whose tokens have all expired.
         await store.PurgeExpiredRetiredAsync(MaxAccessTokenLifetime, ct);

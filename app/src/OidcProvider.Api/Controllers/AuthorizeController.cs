@@ -9,6 +9,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using OidcProvider.Api.Models;
 using OidcProvider.Core.Data;
+using OidcProvider.Core.Entities;
 using OidcProvider.Core.Services;
 using OpenIddict.Abstractions;
 using OpenIddict.Server.AspNetCore;
@@ -69,8 +70,14 @@ public sealed class AuthorizeController : Controller
         var requiredAcr = AcrPolicy.Resolve(request.GetAcrValues(), user.MfaMethods.Count > 0);
         if (!session.SatisfiesAcr(requiredAcr))
         {
+            // If MFA is required but the user has no enrolled factor, fail clearly instead of
+            // redirecting into an unsatisfiable /account/mfa loop. [code review #5]
+            if (requiredAcr == AcrPolicy.Mfa && user.MfaMethods.Count == 0)
+                return Reject("unmet_authentication_requirements", // OIDC / RFC 9470
+                    "Requested acr requires a second factor, but the user has none enrolled.");
             if (promptNone) return Reject(Errors.LoginRequired, "Step-up authentication required.");
-            return Redirect($"/account/mfa?returnUrl={Uri.EscapeDataString(Request.Path + Request.QueryString)}");
+            var kind = user.MfaMethods[0].Kind == MfaKind.WebAuthn ? "webauthn-page" : "mfa";
+            return Redirect($"/account/{kind}?returnUrl={Uri.EscapeDataString(Request.Path + Request.QueryString)}");
         }
 
         // --- Consent (T8) ---
@@ -112,9 +119,19 @@ public sealed class AuthorizeController : Controller
             OpenIddictServerAspNetCoreDefaults.AuthenticationScheme, Claims.Name, Claims.Role);
         identity.SetClaim(Claims.Subject, await _ppid.ForAsync(user.Id, sector)); // ADR-0010
         identity.SetClaim(Claims.Email, user.Email);
-        identity.SetClaim(Claims.EmailVerified, user.EmailVerified.ToString());
+        identity.SetClaim(Claims.EmailVerified, user.EmailVerified); // JSON boolean, not "True" [code review #1]
         identity.SetClaim("acr", session.Acr);
         identity.SetClaims("amr", session.Amr.ToImmutableArray());
+
+        // `profile` scope → emit the profile claims (name, ...) the user actually has.
+        // Previously ProfileClaimsJson was stored but never read, so profile was a no-op. [code review #2]
+        if (requested.Contains(Scopes.Profile) && !string.IsNullOrWhiteSpace(user.ProfileClaimsJson))
+        {
+            using var profile = System.Text.Json.JsonDocument.Parse(user.ProfileClaimsJson);
+            if (profile.RootElement.TryGetProperty("name", out var name) && name.GetString() is { } n)
+                identity.SetClaim(Claims.Name, n);
+        }
+
         identity.SetScopes(requested);
         identity.SetDestinations(GetDestinations);
 

@@ -28,12 +28,18 @@ builder.Services.AddSingleton<IConnectionMultiplexer>(
 
 // ---- Domain services -------------------------------------------------------
 builder.Services.Configure<OidcSigningConfig>(cfg.GetSection("Oidc:Signing"));
-builder.Services.AddSingleton(new PpidOptions
+// ADR-0005/0010: PPID derivation key is long-lived + KMS-guarded in prod. REQUIRE it
+// outside Development — never silently fall back to a hardcoded key (would let anyone
+// reconstruct/correlate pairwise subjects). [security review finding #3]
+var ppidKey = cfg["Oidc:PpidKeyBase64"];
+if (string.IsNullOrEmpty(ppidKey))
 {
-    // ADR-0005/0010: long-lived, KMS-guarded in prod. Dev default from config.
-    DerivationKeyBase64 = cfg["Oidc:PpidKeyBase64"]
-        ?? Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("dev-ppid-derivation-key-32bytes!!"))
-});
+    if (!builder.Environment.IsDevelopment())
+        throw new InvalidOperationException(
+            "Oidc:PpidKeyBase64 must be set outside Development (pairwise-subject derivation key).");
+    ppidKey = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("dev-ppid-derivation-key-32bytes!!"));
+}
+builder.Services.AddSingleton(new PpidOptions { DerivationKeyBase64 = ppidKey });
 builder.Services.AddScoped<IPairwiseSubjects, PairwiseSubjects>();
 builder.Services.AddScoped<IConsentStore, ConsentStore>();
 builder.Services.AddScoped<IUserService, UserService>();
@@ -160,10 +166,16 @@ using (var scope = app.Services.CreateScope())
     // Dev: create schema from the model directly. Production: generate EF migrations
     // (`dotnet ef migrations add Initial`) and call MigrateAsync() instead — see README.
     if (app.Environment.IsDevelopment())
+    {
         await db.Database.EnsureCreatedAsync();
+        // Demo clients/users with known secrets — DEVELOPMENT ONLY. Never seed these in
+        // production (would ship usable credentials). [security review finding #1]
+        await DbSeeder.SeedAsync(scope.ServiceProvider, app.Configuration);
+    }
     else
+    {
         await db.Database.MigrateAsync();
-    await DbSeeder.SeedAsync(scope.ServiceProvider, app.Configuration);
+    }
 }
 
 app.Run();
