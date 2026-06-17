@@ -131,6 +131,27 @@ public static class DbSeeder
             });
         }
 
+        // DPoP-required machine client (ADR-0009 per-client enforcement).
+        const string svcDpop = "svc-dpop";
+        if (await apps.FindByClientIdAsync(svcDpop) is null)
+        {
+            await apps.CreateAsync(new OpenIddictApplicationDescriptor
+            {
+                ClientId = svcDpop,
+                ClientSecret = "svc-dpop-secret-dev-only",
+                ClientType = ClientTypes.Confidential,
+                DisplayName = "DPoP-required service client",
+                Permissions =
+                {
+                    Permissions.Endpoints.Token,
+                    Permissions.GrantTypes.ClientCredentials,
+                    Permissions.Prefixes.Scope + "api",
+                },
+            });
+        }
+        if (!db.ClientPolicies.Any(p => p.ClientId == svcDpop))
+            db.ClientPolicies.Add(new ClientPolicy { ClientId = svcDpop, DpopBound = true });
+
         await db.SaveChangesAsync();
     }
 }

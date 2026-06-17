@@ -219,6 +219,54 @@ public sealed class IntegrationTests : IClassFixture<OidcAppFactory>
         Assert.Equal(HttpStatusCode.BadRequest, rt2After.status);
     }
 
+    [Fact] // DPoP (RFC 9449): a proof at /token binds cnf.jkt into the access token
+    public async Task DPoP_proof_binds_cnf_jkt()
+    {
+        var (proof, jkt) = DpopProof("POST", "http://localhost/token");
+        var req = new HttpRequestMessage(HttpMethod.Post, "/token")
+        {
+            Content = Form(new()
+            {
+                ["grant_type"] = "client_credentials", ["scope"] = "api",
+                ["client_id"] = "svc-loadtest", ["client_secret"] = "svc-secret-dev-only",
+            }),
+        };
+        req.Headers.Add("DPoP", proof);
+        var res = await NewClient().SendAsync(req);
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var at = JsonDocument.Parse(await res.Content.ReadAsStringAsync())
+            .RootElement.GetProperty("access_token").GetString()!;
+        var cnf = DecodeJwt(at).GetProperty("cnf");
+        Assert.Equal(jkt, cnf.GetProperty("jkt").GetString());
+    }
+
+    [Fact] // per-client DPoP enforcement: svc-dpop must present a proof
+    public async Task DPoP_required_client_rejected_without_proof()
+    {
+        var res = await NewClient().PostAsync("/token", Form(new()
+        {
+            ["grant_type"] = "client_credentials", ["scope"] = "api",
+            ["client_id"] = "svc-dpop", ["client_secret"] = "svc-dpop-secret-dev-only",
+        }));
+        Assert.Equal(HttpStatusCode.BadRequest, res.StatusCode);
+        Assert.Contains("invalid_dpop_proof", await res.Content.ReadAsStringAsync());
+    }
+
+    private static (string proof, string jkt) DpopProof(string htm, string htu)
+    {
+        using var ec = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var p = ec.ExportParameters(false);
+        string x = B64Url(p.Q.X!), y = B64Url(p.Q.Y!);
+        var header = $"{{\"typ\":\"dpop+jwt\",\"alg\":\"ES256\",\"jwk\":{{\"kty\":\"EC\",\"crv\":\"P-256\",\"x\":\"{x}\",\"y\":\"{y}\"}}}}";
+        var payload = $"{{\"htm\":\"{htm}\",\"htu\":\"{htu}\",\"iat\":{DateTimeOffset.UtcNow.ToUnixTimeSeconds()},\"jti\":\"{Guid.NewGuid():n}\"}}";
+        var si = B64Url(Encoding.UTF8.GetBytes(header)) + "." + B64Url(Encoding.UTF8.GetBytes(payload));
+        var sig = ec.SignData(Encoding.ASCII.GetBytes(si), HashAlgorithmName.SHA256,
+            DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+        var jkt = B64Url(SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"{{\"crv\":\"P-256\",\"kty\":\"EC\",\"x\":\"{x}\",\"y\":\"{y}\"}}")));
+        return (si + "." + B64Url(sig), jkt);
+    }
+
     // ---------- helpers ----------
 
     private static (string verifier, string challenge) Pkce()

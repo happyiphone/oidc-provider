@@ -2,6 +2,8 @@ using System.Security.Claims;
 using Microsoft.AspNetCore; // GetOpenIddictServerRequest extension
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using OidcProvider.Core.Data;
 using OidcProvider.Core.Services;
 using OidcProvider.Core.Signing;
 using OpenIddict.Abstractions;
@@ -19,8 +21,9 @@ public sealed class TokenController : Controller
 {
     private readonly IOpenIddictTokenManagerFacade _family;
     private readonly IDpopValidator _dpop;
-    public TokenController(IOpenIddictTokenManagerFacade family, IDpopValidator dpop)
-        => (_family, _dpop) = (family, dpop);
+    private readonly AuthDbContext _db;
+    public TokenController(IOpenIddictTokenManagerFacade family, IDpopValidator dpop, AuthDbContext db)
+        => (_family, _dpop, _db) = (family, dpop, db);
 
     [HttpPost("/token"), IgnoreAntiforgeryToken, Produces("application/json")]
     public async Task<IActionResult> Exchange()
@@ -40,6 +43,13 @@ public sealed class TokenController : Controller
                     authenticationSchemes: OpenIddictServerAspNetCoreDefaults.AuthenticationScheme,
                     properties: Error("invalid_dpop_proof", "The DPoP proof is invalid, stale, or replayed."));
         }
+
+        // Per-client policy (ADR-0009): a DPoP-bound client must present a proof.
+        if (request.ClientId is { } clientId && jkt is null &&
+            await _db.ClientPolicies.FirstOrDefaultAsync(p => p.ClientId == clientId) is { DpopBound: true })
+            return Forbid(
+                authenticationSchemes: OpenIddictServerAspNetCoreDefaults.AuthenticationScheme,
+                properties: Error("invalid_dpop_proof", "This client requires a DPoP proof."));
 
         if (request.IsClientCredentialsGrantType())
         {
