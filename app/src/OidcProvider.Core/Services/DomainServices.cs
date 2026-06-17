@@ -146,6 +146,7 @@ public interface IUserSession
     Task<UserSessionData?> GetAsync(string sessionId, CancellationToken ct = default);
     Task<string> CreateAsync(UserSessionData data, TimeSpan ttl, CancellationToken ct = default);
     Task RevokeAsync(string sessionId, CancellationToken ct = default);
+    Task RevokeAllForUserAsync(Guid userId, CancellationToken ct = default); // "log out everywhere"
 }
 
 public sealed class RedisUserSession : IUserSession
@@ -163,15 +164,29 @@ public sealed class RedisUserSession : IUserSession
     public async Task<string> CreateAsync(UserSessionData data, TimeSpan ttl, CancellationToken ct = default)
     {
         var sid = Base64UrlText.Encode(RandomNumberGenerator.GetBytes(32)); // fresh id → anti-fixation
-        await _redis.StringSetAsync(Key(sid),
-            System.Text.Json.JsonSerializer.Serialize(data), ttl);
+        await _redis.StringSetAsync(Key(sid), System.Text.Json.JsonSerializer.Serialize(data), ttl);
+        // Index sid under the user so we can revoke every session on credential change/logout-all.
+        await _redis.SetAddAsync(UserKey(data.UserId), sid);
+        await _redis.KeyExpireAsync(UserKey(data.UserId), ttl + TimeSpan.FromMinutes(5));
         return sid;
     }
 
-    public Task RevokeAsync(string sessionId, CancellationToken ct = default)
-        => _redis.KeyDeleteAsync(Key(sessionId));
+    public async Task RevokeAsync(string sessionId, CancellationToken ct = default)
+    {
+        // Best-effort remove from the user index too (look up the owner first).
+        if (await GetAsync(sessionId, ct) is { } s) await _redis.SetRemoveAsync(UserKey(s.UserId), sessionId);
+        await _redis.KeyDeleteAsync(Key(sessionId));
+    }
+
+    public async Task RevokeAllForUserAsync(Guid userId, CancellationToken ct = default)
+    {
+        var sids = await _redis.SetMembersAsync(UserKey(userId));
+        foreach (var sid in sids) await _redis.KeyDeleteAsync(Key(sid!));
+        await _redis.KeyDeleteAsync(UserKey(userId));
+    }
 
     private static string Key(string sid) => $"sess:{sid}";
+    private static string UserKey(Guid userId) => $"user:sids:{userId}";
 }
 
 // ----------------------------------------------------------------------------
@@ -190,8 +205,9 @@ public sealed class UserService : IUserService
 {
     private readonly AuthDbContext _db;
     private readonly IOpenIddictTokenManagerFacade _tokens; // see Signing/TokenFamily.cs
-    public UserService(AuthDbContext db, IOpenIddictTokenManagerFacade tokens)
-        => (_db, _tokens) = (db, tokens);
+    private readonly IUserSession _sessions;
+    public UserService(AuthDbContext db, IOpenIddictTokenManagerFacade tokens, IUserSession sessions)
+        => (_db, _tokens, _sessions) = (db, tokens, sessions);
 
     public async Task<AppUser?> ValidatePasswordAsync(string username, string password, CancellationToken ct = default)
     {
@@ -219,7 +235,12 @@ public sealed class UserService : IUserService
         if (u is null) return;
         u.CredentialsChangedAt = DateTimeOffset.UtcNow;
         await _db.SaveChangesAsync(ct);
-        await _tokens.RevokeAllForSubjectAsync(userId.ToString(), ct);
+        // Tokens are keyed by the PAIRWISE sub (PPID), not userId — revoke across every PPID
+        // the user has (one per sector/client), else nothing matches. [ADR-0010]
+        var ppids = await _db.SubjectIdentifiers.Where(s => s.UserId == userId)
+            .Select(s => s.Ppid).ToListAsync(ct);
+        foreach (var ppid in ppids) await _tokens.RevokeAllForSubjectAsync(ppid, ct);
+        await _sessions.RevokeAllForUserAsync(userId, ct);             // every browser session
     }
 
     // Argon2id (OWASP-recommended). Params: 64 MiB, 3 passes, parallelism 4 — a reasonable

@@ -166,6 +166,19 @@ public sealed class AccountController : Controller
         return Ok();
     }
 
+    // "Log out everywhere" — revoke ALL of the user's sessions AND token families (this is
+    // also what a password change/reset calls). Closes the credential-change gap.
+    [HttpPost("/account/logout-all"), ValidateAntiForgeryToken]
+    public async Task<IActionResult> LogoutEverywhere()
+    {
+        var (_, session) = await CurrentSessionAsync();
+        if (session is null) return Unauthorized();
+        await _users.RevokeAllForUserAsync(session.UserId);   // tokens (all PPIDs) + all sessions
+        await _audit.WriteAsync("logout.all", session.UserId);
+        await HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+        return Ok();
+    }
+
     // ---- Consent management (view + revoke the apps you've authorized) ----
     [HttpGet("/account/consents")]
     public async Task<IActionResult> Consents()

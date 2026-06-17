@@ -252,6 +252,26 @@ public sealed class IntegrationTests : IClassFixture<OidcAppFactory>
         Assert.Contains("invalid_dpop_proof", await res.Content.ReadAsStringAsync());
     }
 
+    [Fact] // "log out everywhere": revoking one session kills the user's OTHER sessions
+    public async Task Logout_everywhere_kills_all_sessions()
+    {
+        var c1 = NewClient();
+        var c2 = NewClient();
+        await LoginAsync(c1, "alice", "password123!");
+        await LoginAsync(c2, "alice", "password123!");
+        Assert.Equal(HttpStatusCode.OK, (await c1.GetAsync("/account/consents")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await c2.GetAsync("/account/consents")).StatusCode);
+
+        var page = await c1.GetStringAsync("/account/login");   // antiforgery cookie+token
+        var res = await c1.PostAsync("/account/logout-all",
+            Form(new() { ["__RequestVerificationToken"] = AntiforgeryToken(page) }));
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+
+        var c2After = await c2.GetAsync("/account/consents");   // the OTHER browser
+        Assert.Equal(HttpStatusCode.Redirect, c2After.StatusCode);
+        Assert.Contains("/account/login", c2After.Headers.Location!.ToString());
+    }
+
     [Fact] // RP-initiated logout: redirect to a registered URI + session terminated
     public async Task RpInitiated_logout_redirects_and_clears_session()
     {
