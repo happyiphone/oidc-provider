@@ -39,6 +39,22 @@ builder.Services.AddAuthentication(o =>
         o.CorrelationCookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
         o.NonceCookie.SameSite = SameSiteMode.Lax;
         o.NonceCookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
+        // Handle a denied/failed sign-in gracefully instead of throwing (dev error page).
+        o.Events = new Microsoft.AspNetCore.Authentication.OpenIdConnect.OpenIdConnectEvents
+        {
+            OnAccessDenied = ctx =>
+            {
+                ctx.HandleResponse();
+                ctx.Response.Redirect("/?msg=" + Uri.EscapeDataString("Sign-in was cancelled / consent denied."));
+                return Task.CompletedTask;
+            },
+            OnRemoteFailure = ctx =>
+            {
+                ctx.HandleResponse();
+                ctx.Response.Redirect("/?msg=" + Uri.EscapeDataString(ctx.Failure?.Message ?? "Sign-in failed."));
+                return Task.CompletedTask;
+            },
+        };
     });
 
 var app = builder.Build();
@@ -56,6 +72,8 @@ app.MapGet("/", async ctx =>
     sb.Append("<style>body{font:15px system-ui;max-width:46rem;margin:3rem auto;padding:0 1rem}" +
               "li{margin:.15rem 0}code{background:#8881;padding:.1rem .3rem}</style>");
     sb.Append("<h1>OIDC Demo Relying Party</h1>");
+    if (ctx.Request.Query["msg"].ToString() is { Length: > 0 } msg)
+        sb.Append($"<p style='color:#b00;border:1px solid #b008;padding:.5rem'>⚠ {WebUtility.HtmlEncode(msg)}</p>");
     if (ctx.User.Identity?.IsAuthenticated != true)
     {
         sb.Append("<p>You are not signed in.</p><p><a href=\"/login\">▶ Sign in with the OIDC Provider</a></p>");
