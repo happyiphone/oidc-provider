@@ -1,0 +1,24 @@
+@model ConsentsListViewModel
+@{ ViewData["Title"] = "Your authorized apps"; }
+
+<h1>Authorized applications</h1>
+@if (Model.Consents.Count == 0)
+{
+    <p class="muted">You haven't authorized any applications.</p>
+}
+else
+{
+    <ul class="scopes">
+    @foreach (var c in Model.Consents)
+    {
+        <li>
+            <strong>@c.ClientId</strong> — <span class="muted">@string.Join(", ", c.Scopes)</span>
+            <form method="post" action="/account/consents/revoke" style="display:inline">
+                @Html.AntiForgeryToken()
+                <input type="hidden" name="clientId" value="@c.ClientId" />
+                <button type="submit">Revoke</button>
+            </form>
+        </li>
+    }
+    </ul>
+}

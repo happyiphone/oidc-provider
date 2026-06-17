@@ -84,6 +84,7 @@ public static class AcrPolicy
 public interface IConsentStore
 {
     Task<Consent?> GetActiveAsync(Guid userId, string clientId, CancellationToken ct = default);
+    Task<IReadOnlyList<Consent>> ListActiveAsync(Guid userId, CancellationToken ct = default);
     Task RecordAsync(Guid userId, string clientId, IEnumerable<string> scopes, CancellationToken ct = default);
     Task RevokeAsync(Guid userId, string clientId, CancellationToken ct = default);
 }
@@ -98,13 +99,29 @@ public sealed class ConsentStore : IConsentStore
             c => c.UserId == userId && c.ClientId == clientId && c.RevokedAt == null
               && (c.ExpiresAt == null || c.ExpiresAt > DateTimeOffset.UtcNow), ct);
 
+    public async Task<IReadOnlyList<Consent>> ListActiveAsync(Guid userId, CancellationToken ct = default)
+        => await _db.Consents.Where(c => c.UserId == userId && c.RevokedAt == null
+              && (c.ExpiresAt == null || c.ExpiresAt > DateTimeOffset.UtcNow))
+            .OrderBy(c => c.ClientId).ToListAsync(ct);
+
     public async Task RecordAsync(Guid userId, string clientId, IEnumerable<string> scopes, CancellationToken ct = default)
     {
-        var existing = await GetActiveAsync(userId, clientId, ct);
+        // Look up by (user, client) regardless of revoked state — there's a unique index on
+        // that pair, so a previously-revoked row must be REACTIVATED, not duplicated.
+        var existing = await _db.Consents
+            .FirstOrDefaultAsync(c => c.UserId == userId && c.ClientId == clientId, ct);
         if (existing is null)
+        {
             _db.Consents.Add(new Consent { UserId = userId, ClientId = clientId, ScopesGranted = scopes.ToList() });
+        }
         else
-            existing.ScopesGranted = existing.ScopesGranted.Union(scopes).ToList();
+        {
+            existing.ScopesGranted = existing.RevokedAt is null
+                ? existing.ScopesGranted.Union(scopes).ToList()   // active: add new scopes
+                : scopes.ToList();                                // revoked → re-grant fresh
+            existing.RevokedAt = null;
+            existing.GrantedAt = DateTimeOffset.UtcNow;
+        }
         await _db.SaveChangesAsync(ct);
     }
 

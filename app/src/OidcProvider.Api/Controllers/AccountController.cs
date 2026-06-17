@@ -20,9 +20,12 @@ public sealed class AccountController : Controller
     private readonly ITotpService _totp;
     private readonly IWebAuthnService _webauthn;
     private readonly ILoginThrottle _throttle;
-    public AccountController(IUserService users, IUserSession sessions,
-        ITotpService totp, IWebAuthnService webauthn, ILoginThrottle throttle)
-        => (_users, _sessions, _totp, _webauthn, _throttle) = (users, sessions, totp, webauthn, throttle);
+    private readonly IConsentStore _consents;
+    private readonly IAuditLog _audit;
+    public AccountController(IUserService users, IUserSession sessions, ITotpService totp,
+        IWebAuthnService webauthn, ILoginThrottle throttle, IConsentStore consents, IAuditLog audit)
+        => (_users, _sessions, _totp, _webauthn, _throttle, _consents, _audit)
+           = (users, sessions, totp, webauthn, throttle, consents, audit);
 
     [HttpGet("/account/login")]
     public IActionResult LoginPage([FromQuery] string? returnUrl)
@@ -161,6 +164,27 @@ public sealed class AccountController : Controller
         if (User.FindFirst("sid")?.Value is { } sid) await _sessions.RevokeAsync(sid);
         await HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
         return Ok();
+    }
+
+    // ---- Consent management (view + revoke the apps you've authorized) ----
+    [HttpGet("/account/consents")]
+    public async Task<IActionResult> Consents()
+    {
+        var (_, session) = await CurrentSessionAsync();
+        if (session is null) return Redirect("/account/login?returnUrl=/account/consents");
+        var rows = (await _consents.ListActiveAsync(session.UserId))
+            .Select(c => new ConsentRow { ClientId = c.ClientId, Scopes = c.ScopesGranted }).ToList();
+        return View("Consents", new ConsentsListViewModel { Consents = rows });
+    }
+
+    [HttpPost("/account/consents/revoke"), ValidateAntiForgeryToken]
+    public async Task<IActionResult> RevokeConsent([FromForm] string clientId)
+    {
+        var (_, session) = await CurrentSessionAsync();
+        if (session is null) return Redirect("/account/login");
+        await _consents.RevokeAsync(session.UserId, clientId);
+        await _audit.WriteAsync("consent.revoked", session.UserId, clientId);
+        return Redirect("/account/consents");
     }
 
     private async Task<(string? sid, UserSessionData? session)> CurrentSessionAsync()

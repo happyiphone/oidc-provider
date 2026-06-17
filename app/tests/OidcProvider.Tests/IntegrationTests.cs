@@ -252,6 +252,32 @@ public sealed class IntegrationTests : IClassFixture<OidcAppFactory>
         Assert.Contains("invalid_dpop_proof", await res.Content.ReadAsStringAsync());
     }
 
+    [Fact] // consent management: list + revoke → app must re-consent
+    public async Task Consent_can_be_listed_and_revoked()
+    {
+        var c = NewClient();
+        var (_, challenge) = Pkce();
+        await LoginAsync(c, "alice", "password123!");
+        await GetCodeAsync(c, "openid email", challenge, "cm");   // records consent
+
+        var page = await c.GetStringAsync("/account/consents");
+        Assert.Contains("demo-web", page);
+
+        var rev = await c.PostAsync("/account/consents/revoke", Form(new()
+        {
+            ["clientId"] = "demo-web",
+            ["__RequestVerificationToken"] = AntiforgeryToken(page),
+        }));
+        Assert.Equal(HttpStatusCode.Redirect, rev.StatusCode);
+
+        // re-authorizing the same scope now shows the consent page (200), not a code redirect
+        var (_, ch2) = Pkce();
+        var res = await c.GetAsync($"/authorize?client_id=demo-web&response_type=code" +
+            $"&redirect_uri={Uri.EscapeDataString(RedirectUri)}&scope=openid%20email&state=s&nonce=n2" +
+            $"&code_challenge={ch2}&code_challenge_method=S256");
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+    }
+
     [Fact] // RFC 7591: open registration is gated by the initial access token
     public async Task Register_without_initial_access_token_is_rejected()
     {

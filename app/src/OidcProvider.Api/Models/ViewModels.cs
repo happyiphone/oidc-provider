@@ -12,6 +12,17 @@ public sealed class MfaViewModel
     public string? Error { get; set; }
 }
 
+public sealed class ConsentRow
+{
+    public string ClientId { get; set; } = "";
+    public IReadOnlyList<string> Scopes { get; set; } = Array.Empty<string>();
+}
+
+public sealed class ConsentsListViewModel
+{
+    public IReadOnlyList<ConsentRow> Consents { get; set; } = Array.Empty<ConsentRow>();
+}
+
 public sealed class ConsentViewModel
 {
     public string ClientId { get; set; } = "";
