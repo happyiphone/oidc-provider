@@ -1,4 +1,5 @@
 using System.Threading.RateLimiting;
+using Microsoft.AspNetCore; // GetHttpRequest extension
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.RateLimiting;
@@ -12,6 +13,7 @@ using OidcProvider.Core.Services;
 using OidcProvider.Core.Signing;
 using OpenIddict.Abstractions;
 using OpenIddict.Server;
+using OpenIddict.Server.AspNetCore;
 using StackExchange.Redis;
 using static OpenIddict.Abstractions.OpenIddictConstants;
 
@@ -109,6 +111,18 @@ builder.Services.AddOpenIddict()
         o.UseReferenceRefreshTokens();
         o.AddEventHandler<OpenIddictServerEvents.ProcessAuthenticationContext>(
             b => b.UseScopedHandler<RefreshReuseHandler>());
+
+        // Advertise the custom registration endpoint and our DPoP support in discovery so
+        // metadata matches what we actually implement (OIDF conformance checks this).
+        o.AddEventHandler<OpenIddictServerEvents.HandleConfigurationRequestContext>(b => b
+            .UseInlineHandler(ctx =>
+            {
+                // Request-derived base (forwarded-headers aware) → registration endpoint.
+                if (ctx.Transaction.GetHttpRequest() is { } httpReq)
+                    ctx.Metadata["registration_endpoint"] = $"{httpReq.Scheme}://{httpReq.Host}/register";
+                ctx.Metadata["dpop_signing_alg_values_supported"] = new[] { "ES256" };
+                return default;
+            }));
 
         // ADR-0009 (when supported by your OpenIddict version): require PAR + DPoP per client.
         // o.RequirePushedAuthorizationRequests();
