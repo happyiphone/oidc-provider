@@ -196,6 +196,22 @@ app.Use(async (ctx, next) =>
 });
 
 app.UseRateLimiter();          // /token + /par per-IP limit (threat T15)
+
+// DPoP normalizer: let OpenIddict validate a DPoP-scheme access token (it only reads
+// Bearer) by rewriting the header to Bearer and stashing the raw token; the resource
+// controller then enforces the cnf/ath/jkt binding (RFC 9449). [ADR-0009]
+app.Use(async (ctx, next) =>
+{
+    var auth = ctx.Request.Headers.Authorization.ToString();
+    if (auth.StartsWith("DPoP ", StringComparison.OrdinalIgnoreCase))
+    {
+        var token = auth["DPoP ".Length..].Trim();
+        ctx.Items["dpop_access_token"] = token;
+        ctx.Request.Headers.Authorization = "Bearer " + token;
+    }
+    await next();
+});
+
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
