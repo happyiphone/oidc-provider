@@ -14,6 +14,9 @@ using OidcProvider.Core.Signing;
 using OpenIddict.Abstractions;
 using OpenIddict.Server;
 using OpenIddict.Server.AspNetCore;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 using StackExchange.Redis;
 using static OpenIddict.Abstractions.OpenIddictConstants;
 
@@ -160,6 +163,23 @@ if (cfg["Oidc:Signing:Mode"]?.Equals("Kms", StringComparison.OrdinalIgnoreCase) 
     });
     builder.Services.AddHostedService<KeyRotationService>();   // 3-state rotation (ADR-0005)
 }
+
+// OpenTelemetry: request/HTTP traces + metrics. OTLP when an endpoint is configured
+// (real collector); console trace exporter in dev so spans are visible without one.
+var otlp = cfg["Otel:OtlpEndpoint"];
+builder.Services.AddOpenTelemetry()
+    .ConfigureResource(r => r.AddService("oidc-provider"))
+    .WithTracing(t =>
+    {
+        t.AddAspNetCoreInstrumentation().AddHttpClientInstrumentation();
+        if (!string.IsNullOrEmpty(otlp)) t.AddOtlpExporter(o => o.Endpoint = new Uri(otlp));
+        else if (builder.Environment.IsDevelopment()) t.AddConsoleExporter();
+    })
+    .WithMetrics(m =>
+    {
+        m.AddAspNetCoreInstrumentation().AddHttpClientInstrumentation();
+        if (!string.IsNullOrEmpty(otlp)) m.AddOtlpExporter(o => o.Endpoint = new Uri(otlp));
+    });
 
 builder.Services.AddControllersWithViews();
 
