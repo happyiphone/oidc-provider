@@ -116,6 +116,16 @@ public sealed class KmsSignatureProvider : SignatureProvider
         => _key.ECDsa.VerifyData(input, signature, HashAlgorithmName.SHA256,
                DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
 
+    // Span-based overload — newer Microsoft.IdentityModel calls this instead of the byte[]
+    // one; without it the JWT signing pipeline throws IDX10267. Delegate to the above.
+    public override bool Sign(ReadOnlySpan<byte> data, Span<byte> destination, out int bytesWritten)
+    {
+        var sig = Sign(data.ToArray());
+        sig.CopyTo(destination);
+        bytesWritten = sig.Length;
+        return true;
+    }
+
     protected override void Dispose(bool disposing) { }
 
     private static byte[] DerToConcat(byte[] der, int n)

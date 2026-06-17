@@ -128,9 +128,20 @@ builder.Services.AddOpenIddict()
 builder.Services.AddSingleton<IConfigureOptions<OpenIddictServerOptions>, SigningOptionsSetup>();
 if (cfg["Oidc:Signing:Mode"]?.Equals("Kms", StringComparison.OrdinalIgnoreCase) == true)
 {
-    builder.Services.AddSingleton<Amazon.KeyManagementService.IAmazonKeyManagementService>(
-        _ => new Amazon.KeyManagementService.AmazonKeyManagementServiceClient(
-            Amazon.RegionEndpoint.GetBySystemName(cfg["Oidc:Signing:Kms:Region"] ?? "us-east-1")));
+    builder.Services.AddSingleton<Amazon.KeyManagementService.IAmazonKeyManagementService>(_ =>
+    {
+        var kc = new Amazon.KeyManagementService.AmazonKeyManagementServiceConfig();
+        var url = cfg["Oidc:Signing:Kms:ServiceUrl"];
+        if (!string.IsNullOrEmpty(url))   // local-kms / LocalStack: explicit endpoint + basic creds
+        {
+            kc.ServiceURL = url;
+            kc.AuthenticationRegion = cfg["Oidc:Signing:Kms:Region"] ?? "us-east-1";
+            return new Amazon.KeyManagementService.AmazonKeyManagementServiceClient(
+                new Amazon.Runtime.BasicAWSCredentials("test", "test"), kc);
+        }
+        kc.RegionEndpoint = Amazon.RegionEndpoint.GetBySystemName(cfg["Oidc:Signing:Kms:Region"] ?? "us-east-1");
+        return new Amazon.KeyManagementService.AmazonKeyManagementServiceClient(kc); // real KMS: ambient creds
+    });
     builder.Services.AddHostedService<KeyRotationService>();   // 3-state rotation (ADR-0005)
 }
 
@@ -207,6 +218,34 @@ using (var scope = app.Services.CreateScope())
     else
     {
         await db.Database.MigrateAsync();
+    }
+
+    // KMS mode bootstrap: ensure an ACTIVE signing key exists before the first request
+    // (the rotation worker only publishes `next` then promotes later). [ADR-0005]
+    if (cfg["Oidc:Signing:Mode"]?.Equals("Kms", StringComparison.OrdinalIgnoreCase) == true)
+    {
+        var store = scope.ServiceProvider.GetRequiredService<ISigningKeyStore>();
+        if (await store.GetByStatusAsync(OidcProvider.Core.Entities.KeyStatus.Active) is null)
+        {
+            var kms = scope.ServiceProvider
+                .GetRequiredService<Amazon.KeyManagementService.IAmazonKeyManagementService>();
+            var created = await kms.CreateKeyAsync(new Amazon.KeyManagementService.Model.CreateKeyRequest
+            {
+                KeySpec = Amazon.KeyManagementService.KeySpec.ECC_NIST_P256,
+                KeyUsage = Amazon.KeyManagementService.KeyUsageType.SIGN_VERIFY,
+            });
+            var keyId = created.KeyMetadata.KeyId;
+            var pub = await kms.GetPublicKeyAsync(new Amazon.KeyManagementService.Model.GetPublicKeyRequest { KeyId = keyId });
+            await store.InsertAsync(new OidcProvider.Core.Entities.SigningKeyRecord
+            {
+                Kid = "k-" + Guid.NewGuid().ToString("n")[..12],
+                Alg = "ES256",
+                KmsKeyRef = keyId,
+                PublicKeyDer = pub.PublicKey.ToArray(),
+                Status = OidcProvider.Core.Entities.KeyStatus.Active,
+                NotBefore = DateTimeOffset.UtcNow,
+            });
+        }
     }
 }
 

@@ -36,18 +36,23 @@ public sealed class SigningOptionsSetup : IConfigureOptions<OpenIddictServerOpti
             throw new InvalidOperationException(
                 "Oidc:Signing:Mode=Dev is not allowed outside Development. Set Mode=Kms.");
 
+        // Access tokens are unencrypted JWTs (ADR-0004), but OpenIddict still encrypts
+        // authorization codes / refresh tokens — supply a symmetric encryption key (both modes).
+        // Stable across instances when Oidc:Signing:EncryptionKeyBase64 is set; otherwise
+        // ephemeral (fine for a single dev instance; prod should set/KMS-wrap it).
+        var encKeyB64 = _cfg.EncryptionKeyBase64;
+        var enc = string.IsNullOrEmpty(encKeyB64)
+            ? RandomNumberGenerator.GetBytes(32) : Convert.FromBase64String(encKeyB64);
+        options.EncryptionCredentials.Add(new EncryptingCredentials(
+            new SymmetricSecurityKey(enc),
+            SecurityAlgorithms.Aes256KW, SecurityAlgorithms.Aes256CbcHmacSha512));
+
         if (isDev)
         {
             var ecdsa = ECDsa.Create(ECCurve.NamedCurves.nistP256);
             options.SigningCredentials.Add(
                 new SigningCredentials(new ECDsaSecurityKey(ecdsa) { KeyId = "dev-es256" },
                     SecurityAlgorithms.EcdsaSha256));
-            // Access tokens are unencrypted JWTs (ADR-0004), but OpenIddict still encrypts
-            // authorization codes / refresh tokens — supply a symmetric encryption key.
-            var enc = RandomNumberGenerator.GetBytes(32);
-            options.EncryptionCredentials.Add(new EncryptingCredentials(
-                new SymmetricSecurityKey(enc),
-                SecurityAlgorithms.Aes256KW, SecurityAlgorithms.Aes256CbcHmacSha512));
             return;
         }
 
@@ -75,6 +80,7 @@ public sealed class SigningOptionsSetup : IConfigureOptions<OpenIddictServerOpti
 public sealed class OidcSigningConfig
 {
     public string Mode { get; set; } = "Dev";   // Dev | Kms
+    public string? EncryptionKeyBase64 { get; set; }   // stable token-encryption key (both modes)
     public KmsConfig Kms { get; set; } = new();
     public sealed class KmsConfig
     {
