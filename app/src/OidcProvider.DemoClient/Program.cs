@@ -28,6 +28,11 @@ builder.Services.AddAuthentication(o =>
         o.GetClaimsFromUserInfoEndpoint = true;
         o.SaveTokens = true;
         o.RequireHttpsMetadata = false;                // local http authority
+        // Local http: correlation/nonce cookies must not require Secure (else dropped → "Correlation failed").
+        o.CorrelationCookie.SameSite = SameSiteMode.Lax;
+        o.CorrelationCookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
+        o.NonceCookie.SameSite = SameSiteMode.Lax;
+        o.NonceCookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
     });
 
 var app = builder.Build();

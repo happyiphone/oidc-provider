@@ -100,6 +100,15 @@ if (!string.IsNullOrEmpty(fedAuthority))
             o.PushedAuthorizationBehavior = Microsoft.AspNetCore.Authentication.OpenIdConnect
                 .PushedAuthorizationBehavior.Disable; // plain authorize (provider doesn't require PAR here)
             o.RequireHttpsMetadata = !builder.Environment.IsDevelopment(); // dev: allow http authority
+            if (builder.Environment.IsDevelopment())
+            {
+                // Local http: don't require Secure on the correlation/nonce cookies (else the
+                // browser drops them over http → "Correlation failed").
+                o.CorrelationCookie.SameSite = SameSiteMode.Lax;
+                o.CorrelationCookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
+                o.NonceCookie.SameSite = SameSiteMode.Lax;
+                o.NonceCookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
+            }
         });
 }
 
