@@ -330,6 +330,38 @@ public sealed class IntegrationTests : IClassFixture<OidcAppFactory>
         Assert.Contains("access_token", await tok.Content.ReadAsStringAsync());
     }
 
+    [Fact] // admin client management: gated, list, delete
+    public async Task Admin_can_list_and_delete_clients()
+    {
+        var c = NewClient();
+        Assert.Equal(HttpStatusCode.Unauthorized, (await c.GetAsync("/admin/clients")).StatusCode);
+
+        // register a throwaway client
+        var regReq = new HttpRequestMessage(HttpMethod.Post, "/register")
+        {
+            Content = new StringContent(
+                "{\"client_name\":\"adm\",\"grant_types\":[\"client_credentials\"],\"scope\":\"api\"}",
+                Encoding.UTF8, "application/json"),
+        };
+        regReq.Headers.Add("Authorization", "Bearer dev-initial-access-token");
+        var reg = JsonDocument.Parse(await (await c.SendAsync(regReq)).Content.ReadAsStringAsync()).RootElement;
+        var cid = reg.GetProperty("client_id").GetString()!;
+
+        var list = await c.SendAsync(Admin(HttpMethod.Get, "/admin/clients"));
+        Assert.Equal(HttpStatusCode.OK, list.StatusCode);
+        Assert.Contains(cid, await list.Content.ReadAsStringAsync());
+
+        Assert.Equal(HttpStatusCode.NoContent, (await c.SendAsync(Admin(HttpMethod.Delete, $"/admin/clients/{cid}"))).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await c.SendAsync(Admin(HttpMethod.Get, $"/admin/clients/{cid}"))).StatusCode);
+
+        static HttpRequestMessage Admin(HttpMethod m, string url)
+        {
+            var r = new HttpRequestMessage(m, url);
+            r.Headers.Add("Authorization", "Bearer dev-admin-key");
+            return r;
+        }
+    }
+
     private static (string proof, string jkt) DpopProof(string htm, string htu)
     {
         using var ec = ECDsa.Create(ECCurve.NamedCurves.nistP256);
