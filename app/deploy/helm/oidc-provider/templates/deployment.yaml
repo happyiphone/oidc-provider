@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "oidc-provider.fullname" . }}
+  labels:
+    {{- include "oidc-provider.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "oidc-provider.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "oidc-provider.selectorLabels" . | nindent 8 }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: app
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.port }}
+          env:
+            - name: ASPNETCORE_ENVIRONMENT
+              value: Production
+            - name: ASPNETCORE_URLS
+              value: "http://+:{{ .Values.service.port }}"
+            - name: Oidc__Issuer
+              value: {{ .Values.config.issuer | quote }}
+            - name: Oidc__Signing__Mode
+              value: {{ .Values.config.signingMode | quote }}
+            - name: Oidc__Signing__Kms__Region
+              value: {{ .Values.config.kmsRegion | quote }}
+            - name: Otel__OtlpEndpoint
+              value: {{ .Values.config.otlpEndpoint | quote }}
+          envFrom:
+            - secretRef:
+                name: {{ include "oidc-provider.secretName" . }}
+          livenessProbe:
+            httpGet: { path: /health/live, port: {{ .Values.service.port }} }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /health/ready, port: {{ .Values.service.port }} }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

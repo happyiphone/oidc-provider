@@ -1,0 +1,12 @@
+{{ include "oidc-provider.fullname" . }} deployed.
+
+Issuer:    {{ .Values.config.issuer }}
+Discovery: {{ trimSuffix "/" .Values.config.issuer }}/.well-known/openid-configuration
+
+Reminders:
+- Signing mode is "{{ .Values.config.signingMode }}". Production MUST be "Kms" (the app
+  fail-fasts on Dev signing outside Development).
+- Provide the secrets (Postgres/Redis/PPID key/encryption key/registration IAT/admin key)
+  via --set or an existing secret ({{ include "oidc-provider.secretName" . }}); the app
+  refuses to start without Oidc__PpidKeyBase64 outside Development.
+- TLS terminates at the ingress; the app reads X-Forwarded-* so the discovery issuer is https.
