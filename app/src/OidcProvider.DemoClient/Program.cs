@@ -2,11 +2,17 @@ using System.Net;
 using System.Text;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.DataProtection;
 
 // A minimal Relying Party that signs in through the OIDC provider (authorization code +
 // PKCE, with PAR since the provider advertises it). Open http://localhost:5000.
 var builder = WebApplication.CreateBuilder(args);
 var authority = builder.Configuration["Oidc:Authority"] ?? "http://localhost:8081/";
+
+// Persist DataProtection keys so a restart doesn't invalidate the correlation/auth cookies.
+builder.Services.AddDataProtection()
+    .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(Path.GetTempPath(), "oidc-rp-dpkeys")))
+    .SetApplicationName("oidc-demo-rp");
 
 builder.Services.AddAuthentication(o =>
     {

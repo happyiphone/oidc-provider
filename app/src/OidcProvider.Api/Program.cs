@@ -1,5 +1,6 @@
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore; // GetHttpRequest extension
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.RateLimiting;
@@ -22,6 +23,14 @@ using static OpenIddict.Abstractions.OpenIddictConstants;
 
 var builder = WebApplication.CreateBuilder(args);
 var cfg = builder.Configuration;
+
+// Persist DataProtection keys so cookies (auth, correlation, nonce, antiforgery) survive a
+// restart and are shared across instances — otherwise a restart invalidates every in-flight
+// login (the classic "Correlation failed"). Prod: a shared/persisted keystore + KMS-wrapped.
+builder.Services.AddDataProtection()
+    .PersistKeysToFileSystem(new DirectoryInfo(
+        cfg["DataProtection:KeyPath"] ?? Path.Combine(Path.GetTempPath(), "oidc-provider-dpkeys")))
+    .SetApplicationName("oidc-provider");
 
 // ---- Data: Postgres + OpenIddict's protocol tables -------------------------
 builder.Services.AddDbContext<AuthDbContext>(o =>
@@ -91,6 +100,8 @@ if (!string.IsNullOrEmpty(fedAuthority))
             o.ClientId = cfg["Oidc:Federation:ClientId"];
             o.ClientSecret = cfg["Oidc:Federation:ClientSecret"];
             o.ResponseType = "code";
+            o.ResponseMode = "query";   // GET callback → Lax correlation cookie survives the
+                                        // cross-site return from the IdP (form_post would not over http)
             o.UsePkce = true;
             o.SignInScheme = "External";
             o.CallbackPath = "/signin-oidc-external";
