@@ -196,6 +196,7 @@ public interface IUserService
 {
     Task<AppUser?> ValidatePasswordAsync(string username, string password, CancellationToken ct = default);
     Task<AppUser?> GetAsync(Guid id, CancellationToken ct = default);
+    Task<bool> ChangePasswordAsync(Guid userId, string current, string newPassword, CancellationToken ct = default);
     Task RevokeAllForUserAsync(Guid userId, CancellationToken ct = default); // credential change (tree c)
     Task SaveAsync(CancellationToken ct = default);                          // persist tracked changes
     Task AddMfaMethodAsync(UserMfaMethod method, CancellationToken ct = default);
@@ -219,6 +220,19 @@ public sealed class UserService : IUserService
 
     public Task<AppUser?> GetAsync(Guid id, CancellationToken ct = default)
         => _db.Users.Include(x => x.MfaMethods).FirstOrDefaultAsync(x => x.Id == id, ct);
+
+    // Verify current password, set the new one, then revoke everything (tokens + sessions)
+    // issued under the old credential. Caller re-establishes the current device's session.
+    public async Task<bool> ChangePasswordAsync(Guid userId, string current, string newPassword, CancellationToken ct = default)
+    {
+        var u = await _db.Users.FindAsync(new object[] { userId }, ct);
+        if (u?.PasswordHash is null || !Verify(current, u.PasswordHash)) return false;
+        if (string.IsNullOrWhiteSpace(newPassword) || newPassword.Length < 8) return false;
+        u.PasswordHash = Hash(newPassword);
+        await _db.SaveChangesAsync(ct);
+        await RevokeAllForUserAsync(userId, ct);   // bump CredentialsChangedAt + revoke all
+        return true;
+    }
 
     public Task SaveAsync(CancellationToken ct = default) => _db.SaveChangesAsync(ct);
 

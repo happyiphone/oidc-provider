@@ -85,6 +85,17 @@ public static class DbSeeder
             });
         }
 
+        // dave: password-only user reserved for the password-change test (isolated mutation).
+        if (!db.Users.Any(u => u.Username == "dave"))
+        {
+            db.Users.Add(new AppUser
+            {
+                Username = "dave", Email = "dave@example.com", EmailVerified = true,
+                PasswordHash = UserService.Hash("password123!"),
+                ProfileClaimsJson = "{\"name\":\"Dave Example\"}",
+            });
+        }
+
         // carol has a WebAuthn credential enrolled → login routes to the security-key step.
         // Public key is X(32)||Y(32) for the seeded P-256 credential; private key lives only
         // in the test's software authenticator (real enrollment would run attestation).

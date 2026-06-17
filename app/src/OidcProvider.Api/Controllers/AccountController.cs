@@ -166,6 +166,21 @@ public sealed class AccountController : Controller
         return Ok();
     }
 
+    // Change password → revoke all tokens + sessions issued under the old credential, then
+    // re-establish THIS device's session so the user stays logged in where they changed it.
+    [HttpPost("/account/password"), ValidateAntiForgeryToken]
+    public async Task<IActionResult> ChangePassword(
+        [FromForm] string? currentPassword, [FromForm] string? newPassword)
+    {
+        var (_, session) = await CurrentSessionAsync();
+        if (session is null) return Unauthorized();
+        if (!await _users.ChangePasswordAsync(session.UserId, currentPassword ?? "", newPassword ?? ""))
+            return BadRequest(new { error = "password_change_failed" });
+        await _audit.WriteAsync("password.changed", session.UserId);
+        await EstablishSessionAsync(session.UserId, session.Acr, session.Amr); // fresh session here
+        return Ok();
+    }
+
     // "Log out everywhere" — revoke ALL of the user's sessions AND token families (this is
     // also what a password change/reset calls). Closes the credential-change gap.
     [HttpPost("/account/logout-all"), ValidateAntiForgeryToken]

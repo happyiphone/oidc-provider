@@ -252,6 +252,27 @@ public sealed class IntegrationTests : IClassFixture<OidcAppFactory>
         Assert.Contains("invalid_dpop_proof", await res.Content.ReadAsStringAsync());
     }
 
+    [Fact] // password change rotates the credential + revokes other sessions (uses 'dave')
+    public async Task Password_change_revokes_other_sessions()
+    {
+        var c1 = NewClient();
+        var c2 = NewClient();
+        await LoginAsync(c1, "dave", "password123!");
+        await LoginAsync(c2, "dave", "password123!");
+
+        var page = await c1.GetStringAsync("/account/login");
+        var res = await c1.PostAsync("/account/password", Form(new()
+        {
+            ["currentPassword"] = "password123!",
+            ["newPassword"] = "newpass456!",
+            ["__RequestVerificationToken"] = AntiforgeryToken(page),
+        }));
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+
+        Assert.Equal(HttpStatusCode.OK, (await c1.GetAsync("/account/consents")).StatusCode);     // changer stays in
+        Assert.Equal(HttpStatusCode.Redirect, (await c2.GetAsync("/account/consents")).StatusCode); // other dies
+    }
+
     [Fact] // "log out everywhere": revoking one session kills the user's OTHER sessions
     public async Task Logout_everywhere_kills_all_sessions()
     {
