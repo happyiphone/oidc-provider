@@ -186,11 +186,6 @@ public sealed class WebAuthnService : IWebAuthnService
 
     private static string Key(string sid) => $"wa:chal:{sid}";
     private static string RegKey(string sid) => $"wa:reg:{sid}";
-    private static string B64Url(byte[] b) => Convert.ToBase64String(b).TrimEnd('=').Replace('+', '-').Replace('/', '_');
-    private static byte[] B64UrlDecode(string s)
-    {
-        s = s.Replace('-', '+').Replace('_', '/');
-        s += new string('=', (4 - s.Length % 4) % 4);
-        return Convert.FromBase64String(s);
-    }
+    private static string B64Url(byte[] b) => Base64UrlText.Encode(b);
+    private static byte[] B64UrlDecode(string s) => Base64UrlText.Decode(s);
 }

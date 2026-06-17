@@ -44,16 +44,8 @@ public sealed class TokenController : Controller
                 OpenIddictServerAspNetCoreDefaults.AuthenticationScheme);
             var principal = result.Principal!;
 
-            // Re-assert destinations for the freshly minted tokens.
-            foreach (var claim in principal.Claims)
-                claim.SetDestinations(claim.Type switch
-                {
-                    Claims.Name or Claims.Email or Claims.EmailVerified
-                        => new[] { Destinations.IdentityToken },
-                    "acr" or "amr"
-                        => new[] { Destinations.IdentityToken, Destinations.AccessToken },
-                    _ => new[] { Destinations.AccessToken },
-                });
+            // Re-assert destinations for the freshly minted tokens (shared policy).
+            principal.SetDestinations(OidcDestinations.For);
 
             return SignIn(principal, OpenIddictServerAspNetCoreDefaults.AuthenticationScheme);
         }

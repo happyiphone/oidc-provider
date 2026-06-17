@@ -133,22 +133,13 @@ public sealed class AuthorizeController : Controller
         }
 
         identity.SetScopes(requested);
-        identity.SetDestinations(GetDestinations);
+        identity.SetDestinations(OidcDestinations.For);
 
         // OpenIddict now binds nonce, computes at_hash, mints the single-use ≤60s code
         // (bound to client/redirect_uri/code_challenge/sub/scope), and 302s with code+state+iss.
         return SignIn(new ClaimsPrincipal(identity),
             OpenIddictServerAspNetCoreDefaults.AuthenticationScheme);
     }
-
-    private static IEnumerable<string> GetDestinations(Claim claim) => claim.Type switch
-    {
-        Claims.Name or Claims.Email or Claims.EmailVerified
-            => new[] { Destinations.IdentityToken },
-        "acr" or "amr"
-            => new[] { Destinations.IdentityToken, Destinations.AccessToken },
-        _ => new[] { Destinations.AccessToken },
-    };
 
     private IActionResult Reject(string error, string description) => Forbid(
         authenticationSchemes: OpenIddictServerAspNetCoreDefaults.AuthenticationScheme,

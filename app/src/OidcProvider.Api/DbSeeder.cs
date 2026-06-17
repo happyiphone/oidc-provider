@@ -1,3 +1,4 @@
+using OidcProvider.Core;
 using OidcProvider.Core.Data;
 using OidcProvider.Core.Entities;
 using OidcProvider.Core.Services;
@@ -87,14 +88,8 @@ public static class DbSeeder
         // in the test's software authenticator (real enrollment would run attestation).
         if (!db.Users.Any(u => u.Username == "carol"))
         {
-            static byte[] B64Url(string s)
-            {
-                s = s.Replace('-', '+').Replace('_', '/');
-                s += new string('=', (4 - s.Length % 4) % 4);
-                return Convert.FromBase64String(s);
-            }
-            var x = B64Url("I0lHnssp6dHswZwNlEx4WIQf_6FE5ogTZ5m_JEzg-No");
-            var y = B64Url("mpdst-DG205AycM7jL7QaE5J9Xh7iKHZHMgutQ1pM2Y");
+            var x = Base64UrlText.Decode("I0lHnssp6dHswZwNlEx4WIQf_6FE5ogTZ5m_JEzg-No");
+            var y = Base64UrlText.Decode("mpdst-DG205AycM7jL7QaE5J9Xh7iKHZHMgutQ1pM2Y");
             var pub = new byte[64];
             Array.Copy(x, 0, pub, 0, 32); Array.Copy(y, 0, pub, 32, 32);
             db.Users.Add(new AppUser

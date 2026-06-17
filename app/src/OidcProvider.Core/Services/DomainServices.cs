@@ -36,9 +36,8 @@ public sealed class PairwiseSubjects : IPairwiseSubjects
 
         // Deterministic: HMAC(derivationKey, sector || userId) → opaque, stable, unlinkable.
         var mac = new HMACSHA256(_derivationKey);
-        var ppid = Convert.ToBase64String(
-            mac.ComputeHash(Encoding.UTF8.GetBytes(sector + "|" + userId)))
-            .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        var ppid = Base64UrlText.Encode(
+            mac.ComputeHash(Encoding.UTF8.GetBytes(sector + "|" + userId)));
 
         _db.SubjectIdentifiers.Add(new SubjectIdentifier
         { UserId = userId, SectorIdentifier = sector, Ppid = ppid });
@@ -66,6 +65,10 @@ public static class AcrPolicy
 {
     public const string Mfa = "urn:acr:mfa";
     public const string Pwd = "urn:acr:pwd";
+
+    // Ordered ladder: a session satisfies a required acr when its rank is >= required's.
+    // Add new tiers here (e.g. a phishing-resistant level) without touching comparisons.
+    public static int Rank(string acr) => acr switch { Mfa => 2, Pwd => 1, _ => 0 };
 
     public static string Resolve(IEnumerable<string>? requestedAcrValues, bool userHasMfa)
     {
@@ -118,8 +121,7 @@ public sealed class ConsentStore : IConsentStore
 // ----------------------------------------------------------------------------
 public sealed record UserSessionData(Guid UserId, DateTimeOffset AuthTime, string Acr, string[] Amr)
 {
-    public bool SatisfiesAcr(string required) =>
-        required != AcrPolicy.Mfa || Acr == AcrPolicy.Mfa;
+    public bool SatisfiesAcr(string required) => AcrPolicy.Rank(Acr) >= AcrPolicy.Rank(required);
 }
 
 public interface IUserSession
@@ -143,8 +145,7 @@ public sealed class RedisUserSession : IUserSession
 
     public async Task<string> CreateAsync(UserSessionData data, TimeSpan ttl, CancellationToken ct = default)
     {
-        var sid = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32))
-            .TrimEnd('=').Replace('+', '-').Replace('/', '_');   // fresh id → anti-fixation
+        var sid = Base64UrlText.Encode(RandomNumberGenerator.GetBytes(32)); // fresh id → anti-fixation
         await _redis.StringSetAsync(Key(sid),
             System.Text.Json.JsonSerializer.Serialize(data), ttl);
         return sid;

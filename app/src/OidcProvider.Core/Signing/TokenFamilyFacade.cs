@@ -30,11 +30,8 @@ public sealed class TokenFamilyFacade : IOpenIddictTokenManagerFacade
     {
         await foreach (var auth in _authorizations.FindBySubjectAsync(subject, ct))
         {
-            await _authorizations.TryRevokeAsync(auth, ct);
             var id = await _authorizations.GetIdAsync(auth, ct);
-            if (id is not null)
-                await foreach (var token in _tokens.FindByAuthorizationIdAsync(id, ct))
-                    await _tokens.TryRevokeAsync(token, ct);
+            if (id is not null) await RevokeFamilyAsync(id, ct);   // reuse the family-revoke path
         }
     }
 }
