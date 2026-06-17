@@ -114,6 +114,9 @@ builder.Services.AddOpenIddict()
         o.UseReferenceRefreshTokens();
         o.AddEventHandler<OpenIddictServerEvents.ProcessAuthenticationContext>(
             b => b.UseScopedHandler<RefreshReuseHandler>());
+        // private_key_jwt jti single-use (RFC 7523); runs after assertion validation.
+        o.AddEventHandler<OpenIddictServerEvents.ProcessAuthenticationContext>(
+            b => b.UseScopedHandler<ClientAssertionReplayHandler>().SetOrder(1_000_000));
 
         // Advertise the custom registration endpoint and our DPoP support in discovery so
         // metadata matches what we actually implement (OIDF conformance checks this).

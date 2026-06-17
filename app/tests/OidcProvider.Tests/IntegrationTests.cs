@@ -371,6 +371,59 @@ public sealed class IntegrationTests : IClassFixture<OidcAppFactory>
         Assert.Contains("access_token", await tok.Content.ReadAsStringAsync());
     }
 
+    [Fact] // RFC 7523: a private_key_jwt assertion's jti is single-use (replay rejected)
+    public async Task ClientAssertion_jti_replay_is_rejected()
+    {
+        var c = NewClient();
+        var jti = Guid.NewGuid().ToString("n");
+        var assertion = PkJwtAssertion(jti, "http://localhost/token");
+
+        var first = await PostAssertion(c, assertion);
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+
+        var second = await PostAssertion(c, assertion);   // same jti
+        Assert.NotEqual(HttpStatusCode.OK, second.StatusCode);
+        Assert.Contains("invalid_client", await second.Content.ReadAsStringAsync());
+    }
+
+    private static Task<HttpResponseMessage> PostAssertion(HttpClient c, string assertion) =>
+        c.PostAsync("/token", Form(new()
+        {
+            ["grant_type"] = "client_credentials", ["scope"] = "api", ["client_id"] = "svc-pkjwt",
+            ["client_assertion_type"] = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+            ["client_assertion"] = assertion,
+        }));
+
+    private static string PkJwtAssertion(string jti, string aud)
+    {
+        // Test key whose public half is seeded for svc-pkjwt.
+        var p = new ECParameters
+        {
+            Curve = ECCurve.NamedCurves.nistP256,
+            D = B64UrlDec("6c7zbn73U6QT5QUkiH6M0BRTUQdyUX9jgazpWDvKxvY"),
+            Q = new ECPoint
+            {
+                X = B64UrlDec("K9vx4pd6X_clUoclhaILMQVQjx8v57tfSKx5sCLWDoc"),
+                Y = B64UrlDec("6fQbBWFN5c1EvYcGGKFeSWRdndEMAm3P-VUpIAJZocU"),
+            },
+        };
+        using var ec = ECDsa.Create(p);
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var header = "{\"alg\":\"ES256\",\"typ\":\"JWT\",\"kid\":\"pkjwt-1\"}";
+        var payload = $"{{\"iss\":\"svc-pkjwt\",\"sub\":\"svc-pkjwt\",\"aud\":\"{aud}\",\"exp\":{now + 120},\"iat\":{now},\"jti\":\"{jti}\"}}";
+        var si = B64Url(Encoding.UTF8.GetBytes(header)) + "." + B64Url(Encoding.UTF8.GetBytes(payload));
+        var sig = ec.SignData(Encoding.ASCII.GetBytes(si), HashAlgorithmName.SHA256,
+            DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+        return si + "." + B64Url(sig);
+    }
+
+    private static byte[] B64UrlDec(string s)
+    {
+        s = s.Replace('-', '+').Replace('_', '/');
+        s += new string('=', (4 - s.Length % 4) % 4);
+        return Convert.FromBase64String(s);
+    }
+
     [Fact] // admin client management: gated, list, delete
     public async Task Admin_can_list_and_delete_clients()
     {

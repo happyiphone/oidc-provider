@@ -144,6 +144,32 @@ public static class DbSeeder
             });
         }
 
+        // private_key_jwt client (RFC 7523 asymmetric client auth, no shared secret).
+        const string pkjwt = "svc-pkjwt";
+        if (await apps.FindByClientIdAsync(pkjwt) is null)
+        {
+            var jwks = new Microsoft.IdentityModel.Tokens.JsonWebKeySet();
+            jwks.Keys.Add(new Microsoft.IdentityModel.Tokens.JsonWebKey
+            {
+                Kty = "EC", Crv = "P-256", Alg = "ES256", Use = "sig", Kid = "pkjwt-1",
+                X = "K9vx4pd6X_clUoclhaILMQVQjx8v57tfSKx5sCLWDoc",
+                Y = "6fQbBWFN5c1EvYcGGKFeSWRdndEMAm3P-VUpIAJZocU",
+            });
+            await apps.CreateAsync(new OpenIddictApplicationDescriptor
+            {
+                ClientId = pkjwt,
+                ClientType = ClientTypes.Confidential,
+                DisplayName = "private_key_jwt service client",
+                JsonWebKeySet = jwks,                          // asymmetric client auth keys
+                Permissions =
+                {
+                    Permissions.Endpoints.Token,
+                    Permissions.GrantTypes.ClientCredentials,
+                    Permissions.Prefixes.Scope + "api",
+                },
+            });
+        }
+
         // DPoP-required machine client (ADR-0009 per-client enforcement).
         const string svcDpop = "svc-dpop";
         if (await apps.FindByClientIdAsync(svcDpop) is null)
