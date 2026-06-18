@@ -44,13 +44,16 @@ jobs:
           --collect:"XPlat Code Coverage" --results-directory ./coverage
       - name: Coverage report → job summary
         if: always()
+        continue-on-error: true   # informational — never fail the build on reporting
         run: |
-          dotnet tool install -g dotnet-reportgenerator-globaltool >/dev/null 2>&1 || true
           export PATH="$PATH:$HOME/.dotnet/tools"
+          dotnet tool install -g dotnet-reportgenerator-globaltool || true
           reportgenerator -reports:"coverage/**/coverage.cobertura.xml" \
-            -targetdir:coverage/report -reporttypes:"TextSummary;Html;MarkdownSummaryGithub" >/dev/null
-          { echo "## Code coverage"; cat coverage/report/SummaryGithub.md 2>/dev/null \
-            || cat coverage/report/Summary.txt; } >> "$GITHUB_STEP_SUMMARY"
+            -targetdir:coverage/report -reporttypes:"TextSummary;Html;MarkdownSummaryGithub" || true
+          { echo "## Code coverage"; \
+            cat coverage/report/SummaryGithub.md 2>/dev/null \
+            || cat coverage/report/Summary.txt 2>/dev/null \
+            || echo "(coverage report unavailable)"; } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload coverage (HTML)
         if: always()
         uses: actions/upload-artifact@v4
