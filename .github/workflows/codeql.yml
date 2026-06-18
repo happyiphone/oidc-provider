@@ -1,10 +1,14 @@
 name: CodeQL
 
-# Static analysis (SAST) for C#. Code scanning is free on PUBLIC repos; on a PRIVATE repo it needs
-# GitHub Advanced Security (confirmed unavailable on this plan — "Advanced security has not been
-# purchased"). Kept MANUAL-only so it never auto-fails on the private repo; once the repo is public
-# or GHAS is enabled, add `push:`/`pull_request:` (and a weekly `schedule:`) triggers.
+# Static analysis (SAST) for C#. Free on this PUBLIC repo — runs on pushes/PRs to the default
+# branch and weekly. Results appear under the repo's Security → Code scanning tab.
 on:
+  push:
+    branches: [oidc-provider, main]
+  pull_request:
+    branches: [oidc-provider, main]
+  schedule:
+    - cron: "27 3 * * 1" # Mondays 03:27 UTC
   workflow_dispatch:
 
 jobs:
