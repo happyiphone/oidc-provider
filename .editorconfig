@@ -1,0 +1,27 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+
+[*.cs]
+indent_size = 4
+# Treat key correctness analyzers as build errors; keep style as suggestions.
+dotnet_diagnostic.CA2007.severity = none      # ConfigureAwait not required in ASP.NET Core
+csharp_style_namespace_declarations = file_scoped:suggestion
+dotnet_sort_system_directives_first = true
+
+[*.{csproj,props,targets}]
+indent_size = 2
+
+[*.{json,yml,yaml}]
+indent_size = 2
+
+[*.{js,mjs,cshtml}]
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false

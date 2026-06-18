@@ -1,0 +1,27 @@
+name: Bug report
+description: Something doesn't work as expected (not a security vulnerability — use a security advisory for those).
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Expected vs actual. Include the endpoint/flow and any error.
+    validations: { required: true }
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Request to /authorize with ...
+        2. ...
+    validations: { required: true }
+  - type: input
+    id: version
+    attributes:
+      label: Commit / version
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / token (redact secrets)
+      render: shell

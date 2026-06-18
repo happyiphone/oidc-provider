@@ -87,15 +87,19 @@ token ceiling in production:
 - Each token-tier run writes many rows to Postgres; truncate or reset the DB between
   serious runs (`docker exec oidc-pg psql -U oidc -d oidc -c "TRUNCATE ..."`).
 
-## Measured (local, 2026-06-18 — Mac, single instance, dev ES256 signing)
+## Tiers (single-instance reality)
 
-k6 v1.7 against the running provider:
+The token ceiling is **machine- and load-dependent** — measured anywhere from ~90 to ~500 rps on
+one instance depending on the box and what else is running. So the tiers are framed around a single
+instance and gate on **errors**, not edge-of-capacity latency:
 
-| Endpoint | Arrival rate | p95 | avg | errors | checks |
-|---|---|---|---|---|---|
-| **/token** (client_credentials — auth + ES256 sign + persist) | 200 req/s × 30s | **18.3 ms** | 17.4 ms | **0%** (0/6001) | 100% (12002) |
-| **/.well-known/openid-configuration** (read path) | 1000 req/s × 20s | **412 µs** | 350 µs | **0%** (0/20000) | 100% |
+| TIER | rate | latency gate | meaning |
+|---|---|---|---|
+| `medium` | 75 rps | p95 < 300 ms | comfortably sustainable on one instance (verified ~24 ms p95, 0 err) |
+| `high` | 200 rps | p95 < 3 s | saturation edge — one instance may **queue** here (still 0 errors) |
+| `realhigh` | 1000 rps | not asserted | needs horizontal scaling; probes the saturation point |
 
-Take-away: the read path is sub-millisecond and cache-friendly (edge-cache discovery/JWKS for
-thousands of rps); the token hot path holds 200 rps at ~18 ms p95 with a single dev instance and
-zero errors — scale it horizontally (stateless) for higher tiers (`TIER=high|realhigh`).
+Override the latency gate per run with `-e P95_MS=<ms>` (CI uses a generous value on shared
+runners). The read path stays **sub-millisecond at 1000 rps** regardless — cache it at the edge.
+For real token throughput, scale the stateless app horizontally and prefer `private_key_jwt`/mTLS
+over client-secret (skips the per-request secret hash; see "production tuning" above).

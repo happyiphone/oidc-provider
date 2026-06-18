@@ -1,0 +1,9 @@
+# Default owner for everything in the repo.
+* @happyiphone
+
+# Security-sensitive areas — flag explicitly for review.
+/app/src/OidcProvider.Api/Signing/        @happyiphone
+/app/src/OidcProvider.Core/Signing/       @happyiphone
+/app/src/OidcProvider.Api/Controllers/    @happyiphone
+/docs/oidc-provider/adr/                   @happyiphone
+/.github/                                  @happyiphone

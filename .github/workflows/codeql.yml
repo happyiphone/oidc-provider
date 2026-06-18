@@ -1,0 +1,27 @@
+name: CodeQL
+
+# Static analysis (SAST) for C#. NOTE: code scanning is free on PUBLIC repos; on a PRIVATE repo it
+# requires GitHub Advanced Security. Triggered manually + weekly to avoid failing every push while
+# the repo is private — add `push:`/`pull_request:` triggers once it's public or GHAS is enabled.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "27 3 * * 1" # Mondays 03:27 UTC
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: csharp
+          queries: security-and-quality
+      - run: dotnet build app/OidcProvider.sln -c Release
+      - uses: github/codeql-action/analyze@v3

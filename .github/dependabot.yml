@@ -1,0 +1,22 @@
+version: 2
+updates:
+  # NuGet dependencies (the .NET solution under app/)
+  - package-ecosystem: nuget
+    directory: "/app"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      # batch the related framework packages into one PR to reduce noise
+      aspnetcore-and-ef:
+        patterns: ["Microsoft.AspNetCore.*", "Microsoft.EntityFrameworkCore.*", "Npgsql*"]
+      opentelemetry:
+        patterns: ["OpenTelemetry*"]
+      openiddict:
+        patterns: ["OpenIddict*"]
+
+  # GitHub Actions used by the workflows
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
