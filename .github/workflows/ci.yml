@@ -31,7 +31,7 @@ jobs:
           --health-timeout 3s --health-retries 10
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: 9.0.x
       - run: dotnet build OidcProvider.sln -c Release
@@ -86,7 +86,7 @@ jobs:
         options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 3s --health-retries 10
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v5
         with: { dotnet-version: 9.0.x }
       - uses: grafana/setup-k6-action@v1
       - name: Start provider
