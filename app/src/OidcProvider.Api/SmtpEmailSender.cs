@@ -52,7 +52,7 @@ public sealed class SmtpEmailSender : IEmailSender
             await client.AuthenticateAsync(_opts.Smtp.User, _opts.Smtp.Password, ct);
         await client.SendAsync(msg, ct);
         await client.DisconnectAsync(quit: true, ct);
-        _log.LogInformation("SMTP email sent to {To} | {Subject}", to, subject);
+        _log.LogInformation("SMTP email sent | {Subject}", subject); // don't log recipient (PII)
     }
 
     private static SecureSocketOptions ParseSecurity(string s) => s switch

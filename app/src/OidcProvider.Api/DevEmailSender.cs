@@ -15,7 +15,9 @@ public sealed class DevEmailSender : IEmailSender
     public Task SendAsync(string to, string subject, string body, CancellationToken ct = default)
     {
         Last[to] = body;
-        _log.LogInformation("DEV EMAIL → {To} | {Subject} | {Body}", to, subject, body);
+        // Don't log the body — it carries the single-use verify/reset link token. The full body
+        // stays in the in-memory sink (read it via /dev/emails/{address}); logs get only the subject.
+        _log.LogInformation("DEV EMAIL queued | {Subject}", subject);
         return Task.CompletedTask;
     }
 
