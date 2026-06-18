@@ -23,12 +23,14 @@ public sealed class AccountController : Controller
     private readonly IConsentStore _consents;
     private readonly IAuditLog _audit;
     private readonly IBackChannelLogoutNotifier _bcl;
+    private readonly Microsoft.AspNetCore.Antiforgery.IAntiforgery _antiforgery;
     private readonly IConfiguration _cfg;
     public AccountController(IUserService users, IUserSession sessions, ITotpService totp,
         IWebAuthnService webauthn, ILoginThrottle throttle, IConsentStore consents, IAuditLog audit,
-        IBackChannelLogoutNotifier bcl, IConfiguration cfg)
-        => (_users, _sessions, _totp, _webauthn, _throttle, _consents, _audit, _bcl, _cfg)
-           = (users, sessions, totp, webauthn, throttle, consents, audit, bcl, cfg);
+        IBackChannelLogoutNotifier bcl, Microsoft.AspNetCore.Antiforgery.IAntiforgery antiforgery,
+        IConfiguration cfg)
+        => (_users, _sessions, _totp, _webauthn, _throttle, _consents, _audit, _bcl, _antiforgery, _cfg)
+           = (users, sessions, totp, webauthn, throttle, consents, audit, bcl, antiforgery, cfg);
 
     [HttpGet("/account/login")]
     public IActionResult LoginPage([FromQuery] string? returnUrl)
@@ -341,6 +343,46 @@ document.getElementById('go').onclick=auth; auth();
         await _consents.RevokeAsync(session.UserId, clientId);
         await _audit.WriteAsync("consent.revoked", session.UserId, clientId);
         return Redirect("/account/consents");
+    }
+
+    // Self-service account portal: profile, second factors, connected apps, and the security
+    // actions (register passkey, change password, sign out everywhere) — all in one place.
+    [HttpGet("/account/portal")]
+    public async Task<IActionResult> Portal()
+    {
+        var (_, session) = await CurrentSessionAsync();
+        if (session is null) return Redirect("/account/login?returnUrl=/account/portal");
+        var user = await _users.GetAsync(session.UserId);
+        if (user is null) return Redirect("/account/login?returnUrl=/account/portal");
+        var consents = await _consents.ListActiveAsync(user.Id);
+        var tok = _antiforgery.GetAndStoreTokens(HttpContext).RequestToken;
+        string E(string s) => System.Net.WebUtility.HtmlEncode(s);
+
+        var mfa = user.MfaMethods.Count == 0 ? "<li>None enrolled</li>"
+            : string.Join("", user.MfaMethods.Select(m => $"<li>{E(m.Kind.ToString())} — {E(m.Label ?? "")}</li>"));
+        var apps = consents.Count == 0 ? "<li>No connected applications</li>"
+            : string.Join("", consents.Select(c =>
+                $"<li><code>{E(c.ClientId)}</code> — {E(string.Join(" ", c.ScopesGranted))} " +
+                $"<form method=post action=/account/consents/revoke style=display:inline>" +
+                $"<input type=hidden name=__RequestVerificationToken value=\"{tok}\" />" +
+                $"<input type=hidden name=clientId value=\"{E(c.ClientId)}\" /><button>Revoke</button></form></li>"));
+
+        var html =
+            "<!doctype html><meta charset=utf-8><title>Your account</title>" +
+            "<style>body{font:15px/1.5 system-ui;max-width:42rem;margin:3rem auto;padding:0 1rem}" +
+            "code{background:#8881;padding:.1rem .3rem}button{cursor:pointer}h2{font-size:1.1rem;margin-top:1.6rem}</style>" +
+            $"<h1>Your account</h1><p><b>{E(user.Username ?? "")}</b> &lt;{E(user.Email ?? "")}&gt; " +
+            $"{(user.EmailVerified ? "(verified)" : "(unverified)")}</p>" +
+            $"<h2>Second factors</h2><ul>{mfa}</ul><p><a href=/account/security>＋ Register a passkey</a></p>" +
+            $"<h2>Connected applications</h2><ul>{apps}</ul>" +
+            "<h2>Change password</h2><form method=post action=/account/password>" +
+            $"<input type=hidden name=__RequestVerificationToken value=\"{tok}\" />" +
+            "<input type=password name=currentPassword placeholder=current /> " +
+            "<input type=password name=newPassword placeholder=new /> <button>Change</button></form>" +
+            "<h2>Sessions</h2><form method=post action=/account/logout-all>" +
+            $"<input type=hidden name=__RequestVerificationToken value=\"{tok}\" />" +
+            "<button>Sign out everywhere</button></form>";
+        return Content(html, "text/html");
     }
 
     private async Task<(string? sid, UserSessionData? session)> CurrentSessionAsync()

@@ -106,6 +106,37 @@ public sealed class IntegrationTests : IClassFixture<OidcAppFactory>
         Assert.Equal(sub, uiJson.GetProperty("sub").GetString());
     }
 
+    [Fact] // regression (OIDF): id_token must carry auth_time (required for max_age/prompt=login)
+    public async Task IdToken_includes_auth_time()
+    {
+        var c = NewClient();
+        var (verifier, challenge) = Pkce();
+        await LoginAsync(c, "alice", "password123!");
+        var code = await GetCodeAsync(c, "openid", challenge, nonce: "n-at");
+        var claims = DecodeJwt((await ExchangeCodeAsync(c, code, verifier)).GetProperty("id_token").GetString()!);
+        Assert.True(claims.TryGetProperty("auth_time", out var at), "auth_time missing");
+        Assert.Equal(JsonValueKind.Number, at.ValueKind);              // a number, not a string
+        Assert.True(at.GetInt64() > 0);
+    }
+
+    [Fact] // RFC 8707: the `resource` parameter must audience-restrict the access token
+    public async Task ResourceIndicator_restricts_access_token_audience()
+    {
+        var res = await NewClient().PostAsync("/token", Form(new()
+        {
+            ["grant_type"] = "client_credentials", ["scope"] = "api",
+            ["client_id"] = "svc-loadtest", ["client_secret"] = "svc-secret-dev-only",
+            ["resource"] = "https://api.test/",
+        }));
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var at = JsonDocument.Parse(await res.Content.ReadAsStringAsync()).RootElement
+            .GetProperty("access_token").GetString()!;
+        var aud = DecodeJwt(at).GetProperty("aud");
+        var auds = aud.ValueKind == JsonValueKind.Array
+            ? aud.EnumerateArray().Select(e => e.GetString()) : new[] { aud.GetString() };
+        Assert.Contains("https://api.test/", auds);
+    }
+
     [Fact] // regression: email_verified must be a JSON boolean, not the string "True" (code review #1)
     public async Task IdToken_email_verified_is_a_boolean()
     {

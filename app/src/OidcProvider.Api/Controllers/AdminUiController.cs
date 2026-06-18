@@ -2,6 +2,9 @@ using System.Net;
 using System.Text;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using OidcProvider.Core.Data;
+using OidcProvider.Core.Services;
 using OpenIddict.Abstractions;
 
 namespace OidcProvider.Api.Controllers;
@@ -14,8 +17,11 @@ public sealed class AdminUiController : Controller
     private readonly IOpenIddictApplicationManager _apps;
     private readonly IConfiguration _cfg;
     private readonly IAntiforgery _antiforgery;
-    public AdminUiController(IOpenIddictApplicationManager apps, IConfiguration cfg, IAntiforgery antiforgery)
-        => (_apps, _cfg, _antiforgery) = (apps, cfg, antiforgery);
+    private readonly AuthDbContext _db;
+    private readonly IUserService _users;
+    public AdminUiController(IOpenIddictApplicationManager apps, IConfiguration cfg, IAntiforgery antiforgery,
+        AuthDbContext db, IUserService users)
+        => (_apps, _cfg, _antiforgery, _db, _users) = (apps, cfg, antiforgery, db, users);
 
     private const string Cookie = "admin_key";
     private bool Authed()
@@ -53,7 +59,25 @@ public sealed class AdminUiController : Controller
                 $"<input type=hidden name=__RequestVerificationToken value=\"{t2.RequestToken}\" />" +
                 $"<input type=hidden name=clientId value=\"{E(id)}\" /><button>Delete</button></form></td></tr>");
         }
-        sb.Append("</table><form method=post action=/admin/ui/logout style=margin-top:1rem>" +
+        sb.Append("</table>");
+
+        // ---- Users ----
+        sb.Append("<h1 style=margin-top:2rem>Users</h1><table border=1 cellpadding=6 cellspacing=0>" +
+            "<tr><th>username</th><th>email</th><th>verified</th><th>active</th><th>MFA</th><th></th></tr>");
+        var users = await _db.Users.Include(u => u.MfaMethods).OrderBy(u => u.Username).ToListAsync();
+        foreach (var u in users)
+        {
+            var mfa = u.MfaMethods.Count == 0 ? "—" : string.Join(",", u.MfaMethods.Select(m => m.Kind.ToString()));
+            var toggle = u.IsActive ? ("lock", "Lock") : ("unlock", "Unlock");
+            sb.Append($"<tr><td>{E(u.Username ?? "")}</td><td>{E(u.Email ?? "")}</td>" +
+                $"<td>{(u.EmailVerified ? "✓" : "")}</td><td>{(u.IsActive ? "✓" : "🔒")}</td><td>{E(mfa)}</td><td>" +
+                UserForm($"/admin/ui/user/{toggle.Item1}", u.Id, toggle.Item2, t2.RequestToken) + " " +
+                UserForm("/admin/ui/user/delete", u.Id, "Delete", t2.RequestToken, confirm: $"Delete {u.Username}?") +
+                "</td></tr>");
+        }
+        sb.Append("</table>");
+
+        sb.Append("<form method=post action=/admin/ui/logout style=margin-top:1rem>" +
             $"<input type=hidden name=__RequestVerificationToken value=\"{t2.RequestToken}\" /><button>Sign out</button></form>");
         return Html(sb.ToString());
     }
@@ -89,6 +113,47 @@ public sealed class AdminUiController : Controller
         Response.Cookies.Delete(Cookie);
         return Redirect("/admin/ui");
     }
+
+    // ---- User management ----
+    [HttpPost("/admin/ui/user/lock"), ValidateAntiForgeryToken]
+    public async Task<IActionResult> LockUser([FromForm] Guid userId)
+    {
+        if (!Authed()) return Unauthorized();
+        if (await _db.Users.FindAsync(userId) is { } u)
+        {
+            u.IsActive = false;
+            await _db.SaveChangesAsync();
+            await _users.RevokeAllForUserAsync(userId); // kill sessions + token families immediately
+        }
+        return Redirect("/admin/ui");
+    }
+
+    [HttpPost("/admin/ui/user/unlock"), ValidateAntiForgeryToken]
+    public async Task<IActionResult> UnlockUser([FromForm] Guid userId)
+    {
+        if (!Authed()) return Unauthorized();
+        if (await _db.Users.FindAsync(userId) is { } u) { u.IsActive = true; await _db.SaveChangesAsync(); }
+        return Redirect("/admin/ui");
+    }
+
+    [HttpPost("/admin/ui/user/delete"), ValidateAntiForgeryToken]
+    public async Task<IActionResult> DeleteUser([FromForm] Guid userId)
+    {
+        if (!Authed()) return Unauthorized();
+        if (await _db.Users.FindAsync(userId) is { } u)
+        {
+            await _users.RevokeAllForUserAsync(userId);
+            _db.Users.Remove(u);
+            await _db.SaveChangesAsync();
+        }
+        return Redirect("/admin/ui");
+    }
+
+    private string UserForm(string action, Guid userId, string label, string token, string? confirm = null)
+        => $"<form method=post action={action} style=display:inline" +
+           (confirm is null ? "" : $" onsubmit=\"return confirm('{E(confirm)}')\"") + ">" +
+           $"<input type=hidden name=__RequestVerificationToken value=\"{token}\" />" +
+           $"<input type=hidden name=userId value=\"{userId}\" /><button>{E(label)}</button></form>";
 
     private static string E(string s) => WebUtility.HtmlEncode(s);
     private IActionResult Html(string body) => Content(

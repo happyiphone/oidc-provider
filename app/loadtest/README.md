@@ -86,3 +86,16 @@ token ceiling in production:
   queues rather than errors under overload) is the takeaway.
 - Each token-tier run writes many rows to Postgres; truncate or reset the DB between
   serious runs (`docker exec oidc-pg psql -U oidc -d oidc -c "TRUNCATE ..."`).
+
+## Measured (local, 2026-06-18 — Mac, single instance, dev ES256 signing)
+
+k6 v1.7 against the running provider:
+
+| Endpoint | Arrival rate | p95 | avg | errors | checks |
+|---|---|---|---|---|---|
+| **/token** (client_credentials — auth + ES256 sign + persist) | 200 req/s × 30s | **18.3 ms** | 17.4 ms | **0%** (0/6001) | 100% (12002) |
+| **/.well-known/openid-configuration** (read path) | 1000 req/s × 20s | **412 µs** | 350 µs | **0%** (0/20000) | 100% |
+
+Take-away: the read path is sub-millisecond and cache-friendly (edge-cache discovery/JWKS for
+thousands of rps); the token hot path holds 200 rps at ~18 ms p95 with a single dev instance and
+zero errors — scale it horizontally (stateless) for higher tiers (`TIER=high|realhigh`).
