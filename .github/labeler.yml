@@ -1,0 +1,25 @@
+# Path-based PR labels (used by .github/workflows/labeler.yml).
+area:api:
+  - changed-files:
+      - any-glob-to-any-file: ["app/src/OidcProvider.Api/**"]
+area:core:
+  - changed-files:
+      - any-glob-to-any-file: ["app/src/OidcProvider.Core/**"]
+area:signing:
+  - changed-files:
+      - any-glob-to-any-file: ["app/src/**/Signing/**"]
+tests:
+  - changed-files:
+      - any-glob-to-any-file: ["app/tests/**"]
+docs:
+  - changed-files:
+      - any-glob-to-any-file: ["**/*.md", "docs/**"]
+ci:
+  - changed-files:
+      - any-glob-to-any-file: [".github/**"]
+deploy:
+  - changed-files:
+      - any-glob-to-any-file: ["app/deploy/**", "app/Dockerfile", "app/docker-compose.yml"]
+conformance:
+  - changed-files:
+      - any-glob-to-any-file: ["app/conformance/**", "app/loadtest/**"]

@@ -541,6 +541,21 @@ public sealed class IntegrationTests : IClassFixture<OidcAppFactory>
         return (verifier, challenge);
     }
 
+    [Fact] // open-redirect defense (CodeQL): a non-local returnUrl after login must drop to "/"
+    public async Task Login_ignores_external_return_url()
+    {
+        var c = NewClient();
+        var page = await c.GetStringAsync("/account/login");
+        var res = await c.PostAsync("/account/login", Form(new()
+        {
+            ["username"] = "alice", ["password"] = "password123!",
+            ["returnUrl"] = "https://evil.example/phish",
+            ["__RequestVerificationToken"] = AntiforgeryToken(page),
+        }));
+        Assert.Equal(HttpStatusCode.Redirect, res.StatusCode);
+        Assert.Equal("/", res.Headers.Location!.ToString());          // NOT the attacker URL
+    }
+
     private static async Task LoginAsync(HttpClient c, string user, string pwd)
     {
         var page = await c.GetStringAsync("/account/login");
