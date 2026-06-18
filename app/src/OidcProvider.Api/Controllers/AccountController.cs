@@ -63,7 +63,7 @@ public sealed class AccountController : Controller
         await HttpContext.SignOutAsync("External");
         await EstablishSessionAsync(user.Id, AcrPolicy.Pwd, new[] { "ext" });
         await _audit.WriteAsync("login.federated", user.Id);
-        return Redirect(returnUrl ?? "/");
+        return Redirect(SafeLocal(returnUrl));
     }
 
     [HttpPost("/account/login"), ValidateAntiForgeryToken]
@@ -87,14 +87,14 @@ public sealed class AccountController : Controller
         {
             // Establish a PARTIAL (acr=pwd) session, then route to the right second factor.
             await EstablishSessionAsync(user.Id, AcrPolicy.Pwd, new[] { "pwd" });
-            var ret = Uri.EscapeDataString(returnUrl ?? "/");
+            var ret = Uri.EscapeDataString(SafeLocal(returnUrl));
             return Redirect(user.MfaMethods[0].Kind == MfaKind.WebAuthn
                 ? $"/account/webauthn-page?returnUrl={ret}"
                 : $"/account/mfa?returnUrl={ret}");
         }
 
         await EstablishSessionAsync(user.Id, AcrPolicy.Pwd, new[] { "pwd" });
-        return Redirect(returnUrl ?? "/");
+        return Redirect(SafeLocal(returnUrl));
     }
 
     // ---- TOTP (RFC 6238) ----
@@ -114,7 +114,7 @@ public sealed class AccountController : Controller
 
         await _sessions.RevokeAsync(sid!);
         await EstablishSessionAsync(session.UserId, AcrPolicy.Mfa, new[] { "pwd", "otp" });
-        return Redirect(returnUrl ?? "/");
+        return Redirect(SafeLocal(returnUrl));
     }
 
     // ---- WebAuthn / FIDO2 ----
@@ -213,7 +213,7 @@ document.getElementById('go').onclick=auth; auth();
         // Passwordless passkey is phishing-resistant → treat as strong (MFA-level) auth.
         await EstablishSessionAsync(user.Id, AcrPolicy.Mfa, new[] { "webauthn" });
         await _audit.WriteAsync("login.passwordless", user.Id);
-        return Ok(new { ok = true, returnUrl = returnUrl ?? "/" });
+        return Ok(new { ok = true, returnUrl = SafeLocal(returnUrl) });
     }
 
     [HttpPost("/account/webauthn/register/options")]
@@ -280,7 +280,7 @@ document.getElementById('go').onclick=auth; auth();
         await _users.SaveAsync();                 // persist updated signCount (clone detection)
         await _sessions.RevokeAsync(sid!);
         await EstablishSessionAsync(session.UserId, AcrPolicy.Mfa, new[] { "pwd", "webauthn" });
-        return Ok(new { ok = true, returnUrl = returnUrl ?? "/" });
+        return Ok(new { ok = true, returnUrl = SafeLocal(returnUrl) });
     }
 
     [HttpPost("/account/logout"), ValidateAntiForgeryToken]
@@ -384,6 +384,12 @@ document.getElementById('go').onclick=auth; auth();
             "<button>Sign out everywhere</button></form>";
         return Content(html, "text/html");
     }
+
+    // Open-redirect defense: only ever redirect to a LOCAL path. A user-supplied returnUrl that
+    // isn't a same-site relative URL (e.g. https://evil.example) is dropped to "/". [CodeQL
+    // cs/web/unvalidated-url-redirection — post-login phishing vector]
+    private string SafeLocal(string? returnUrl)
+        => !string.IsNullOrEmpty(returnUrl) && Url.IsLocalUrl(returnUrl) ? returnUrl : "/";
 
     private async Task<(string? sid, UserSessionData? session)> CurrentSessionAsync()
     {
