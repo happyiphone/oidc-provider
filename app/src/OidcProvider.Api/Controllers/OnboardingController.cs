@@ -17,8 +17,11 @@ public sealed class OnboardingController : Controller
     private readonly ITokenLinkStore _links;
     private readonly IEmailSender _email;
     private readonly IAuditLog _audit;
-    public OnboardingController(IUserService users, ITokenLinkStore links, IEmailSender email, IAuditLog audit)
-        => (_users, _links, _email, _audit) = (users, links, email, audit);
+    private readonly IUserSession _sessions;
+    private readonly IBackChannelLogoutNotifier _bcl;
+    public OnboardingController(IUserService users, ITokenLinkStore links, IEmailSender email,
+        IAuditLog audit, IUserSession sessions, IBackChannelLogoutNotifier bcl)
+        => (_users, _links, _email, _audit, _sessions, _bcl) = (users, links, email, audit, sessions, bcl);
 
     private string Base => $"{Request.Scheme}://{Request.Host}";
 
@@ -65,7 +68,9 @@ public sealed class OnboardingController : Controller
             return BadRequest(new { error = "weak_password" });
         var userId = await _links.ConsumeAsync(ResetPurpose, token ?? "");
         if (userId is null) return BadRequest(new { error = "invalid_token" });
+        var sessionClients = await _sessions.GetUserSessionClientsAsync(userId.Value); // before revoke
         await _users.ResetPasswordAsync(userId.Value, newPassword);   // sets pw + revokes all tokens/sessions
+        await _bcl.NotifyAllSessionsAsync(userId.Value, sessionClients); // BCL: kill RP sessions everywhere
         await _audit.WriteAsync("password.reset", userId);
         return Ok(new { status = "password_reset" });
     }

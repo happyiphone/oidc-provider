@@ -30,12 +30,13 @@ public sealed class AuthorizeController : Controller
     private readonly IAntiforgery _antiforgery;
     private readonly IAuditLog _audit;
     private readonly IOpenIddictApplicationManager _apps;
+    private readonly IConfiguration _cfg;
 
     public AuthorizeController(IUserSession sessions, IUserService users,
         IConsentStore consents, IPairwiseSubjects ppid, AuthDbContext db, IAntiforgery antiforgery,
-        IAuditLog audit, IOpenIddictApplicationManager apps)
-        => (_sessions, _users, _consents, _ppid, _db, _antiforgery, _audit, _apps)
-           = (sessions, users, consents, ppid, db, antiforgery, audit, apps);
+        IAuditLog audit, IOpenIddictApplicationManager apps, IConfiguration cfg)
+        => (_sessions, _users, _consents, _ppid, _db, _antiforgery, _audit, _apps, _cfg)
+           = (sessions, users, consents, ppid, db, antiforgery, audit, apps, cfg);
 
     [HttpGet("/authorize"), HttpPost("/authorize")]
     [IgnoreAntiforgeryToken] // CSRF defense here is the mandatory `state` param (T5)
@@ -44,10 +45,16 @@ public sealed class AuthorizeController : Controller
         var request = HttpContext.GetOpenIddictServerRequest()
             ?? throw new InvalidOperationException("Not an OpenID Connect request.");
 
-        // ADR-0011 belt-and-braces: require S256 explicitly (T11).
-        if (request.CodeChallenge is null ||
-            request.CodeChallengeMethod != CodeChallengeMethods.Sha256)
-            return Reject(Errors.InvalidRequest, "PKCE with S256 is required.");
+        // ADR-0011: PKCE mandatory by default (OAuth 2.1). `Oidc:Pkce:Required=false` relaxes it to
+        // recommended (still S256-only when present) — e.g. to serve the legacy OIDC Basic profile,
+        // which predates mandatory PKCE. Production keeps the default (required). [T11]
+        if (request.CodeChallenge is null)
+        {
+            if (_cfg.GetValue("Oidc:Pkce:Required", true))
+                return Reject(Errors.InvalidRequest, "PKCE with S256 is required.");
+        }
+        else if (request.CodeChallengeMethod != CodeChallengeMethods.Sha256)
+            return Reject(Errors.InvalidRequest, "Only S256 PKCE is allowed (plain is rejected).");
 
         var promptNone = request.HasPromptValue("none"); // OIDC prompt=none
 
@@ -60,10 +67,15 @@ public sealed class AuthorizeController : Controller
         if (session is null || maxAgeExceeded || request.HasPromptValue("login"))
         {
             if (promptNone) return Reject(Errors.LoginRequired, "Interactive login required.");
+            // prompt=login forces re-auth ONCE — this Challenge IS that forced login, so strip
+            // `login` from the return URL's prompt; otherwise the post-login /authorize re-prompts
+            // in a loop. [OIDC: prompt=login is satisfied once the user (re-)authenticates]
+            var returnQuery = request.HasPromptValue("login")
+                ? QueryWithoutPromptLogin(Request.Query)
+                : Request.QueryString.ToString();
             return Challenge(
                 authenticationSchemes: CookieAuthenticationDefaults.AuthenticationScheme,
-                properties: new AuthenticationProperties
-                { RedirectUri = Request.Path + Request.QueryString });
+                properties: new AuthenticationProperties { RedirectUri = Request.Path + returnQuery });
         }
 
         var user = await _users.GetAsync(session.UserId);
@@ -142,7 +154,15 @@ public sealed class AuthorizeController : Controller
         identity.SetClaim(Claims.Email, user.Email);
         identity.SetClaim(Claims.EmailVerified, user.EmailVerified); // JSON boolean, not "True" [code review #1]
         identity.SetClaim("acr", session.Acr);
+        identity.SetClaim("sid", sid); // session id → id_token; enables back-channel logout matching
+        // auth_time (seconds) — REQUIRED by OIDC when max_age is used and for prompt=login
+        // verification; emitted as a JSON number via the Integer64 value type.
+        identity.AddClaim(new Claim("auth_time", session.AuthTime.ToUnixTimeSeconds().ToString(),
+            ClaimValueTypes.Integer64));
         identity.SetClaims("amr", session.Amr.ToImmutableArray());
+
+        // Remember this RP under the session so back-channel logout can notify it later (OIDC BCL).
+        await _sessions.AddClientAsync(sid!, request.ClientId!);
 
         // `profile` scope → emit the profile claims (name, ...) the user actually has.
         // Previously ProfileClaimsJson was stored but never read, so profile was a no-op. [code review #2]
@@ -154,12 +174,50 @@ public sealed class AuthorizeController : Controller
         }
 
         identity.SetScopes(requested);
+        identity.SetResources((request.Resources ?? Array.Empty<string?>())
+            .Where(r => !string.IsNullOrEmpty(r)).Select(r => r!).ToArray()); // RFC 8707 audience restriction
+
+        // RFC 9396 Rich Authorization Requests: carry the structured `authorization_details` grant
+        // into the access token (present in the query on GET, reposted in the consent form on POST).
+        var authDetails = Request.Query["authorization_details"].FirstOrDefault()
+            ?? (Request.HasFormContentType ? Request.Form["authorization_details"].FirstOrDefault() : null);
+        if (!string.IsNullOrEmpty(authDetails))
+        {
+            try
+            {
+                using var d = System.Text.Json.JsonDocument.Parse(authDetails);
+                if (d.RootElement.ValueKind != System.Text.Json.JsonValueKind.Array)
+                    return Reject(Errors.InvalidRequest, "authorization_details must be a JSON array.");
+            }
+            catch { return Reject(Errors.InvalidRequest, "authorization_details must be valid JSON."); }
+            // JSON_ARRAY value type → always serialized as a JSON array (a single JSON claim would
+            // otherwise be collapsed to a scalar object; RFC 9396 requires an array).
+            identity.AddClaim(new Claim("authorization_details", authDetails, "JSON_ARRAY"));
+        }
+
         identity.SetDestinations(OidcDestinations.For);
 
         // OpenIddict now binds nonce, computes at_hash, mints the single-use ≤60s code
         // (bound to client/redirect_uri/code_challenge/sub/scope), and 302s with code+state+iss.
         return SignIn(new ClaimsPrincipal(identity),
             OpenIddictServerAspNetCoreDefaults.AuthenticationScheme);
+    }
+
+    // Rebuild the query string with "login" removed from the prompt parameter (drop prompt if empty).
+    private static string QueryWithoutPromptLogin(IQueryCollection query)
+    {
+        var d = new Dictionary<string, string?>(StringComparer.Ordinal);
+        foreach (var kv in query)
+        {
+            if (kv.Key == "prompt")
+            {
+                var rest = string.Join(' ', kv.Value.ToString()
+                    .Split(' ', StringSplitOptions.RemoveEmptyEntries).Where(p => p != "login"));
+                if (!string.IsNullOrEmpty(rest)) d["prompt"] = rest;
+            }
+            else d[kv.Key] = kv.Value.ToString();
+        }
+        return QueryString.Create(d).ToString();
     }
 
     private IActionResult Reject(string error, string description) => Forbid(

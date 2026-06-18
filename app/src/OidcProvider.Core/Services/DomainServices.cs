@@ -147,6 +147,13 @@ public interface IUserSession
     Task<string> CreateAsync(UserSessionData data, TimeSpan ttl, CancellationToken ct = default);
     Task RevokeAsync(string sessionId, CancellationToken ct = default);
     Task RevokeAllForUserAsync(Guid userId, CancellationToken ct = default); // "log out everywhere"
+    // Back-channel logout (OIDC BCL 1.0): remember which RPs authenticated under this session so
+    // we know whom to notify when it ends. Recorded at code issuance, read at logout.
+    Task AddClientAsync(string sessionId, string clientId, CancellationToken ct = default);
+    Task<IReadOnlyCollection<string>> GetClientsAsync(string sessionId, CancellationToken ct = default);
+    // All of a user's sessions and the RPs each touched — for fanning back-channel logout across
+    // every session on a credential change / "log out everywhere". Snapshot it BEFORE revoking.
+    Task<IReadOnlyDictionary<string, string[]>> GetUserSessionClientsAsync(Guid userId, CancellationToken ct = default);
 }
 
 public sealed class RedisUserSession : IUserSession
@@ -176,17 +183,45 @@ public sealed class RedisUserSession : IUserSession
         // Best-effort remove from the user index too (look up the owner first).
         if (await GetAsync(sessionId, ct) is { } s) await _redis.SetRemoveAsync(UserKey(s.UserId), sessionId);
         await _redis.KeyDeleteAsync(Key(sessionId));
+        await _redis.KeyDeleteAsync(ClientsKey(sessionId));
     }
 
     public async Task RevokeAllForUserAsync(Guid userId, CancellationToken ct = default)
     {
         var sids = await _redis.SetMembersAsync(UserKey(userId));
-        foreach (var sid in sids) await _redis.KeyDeleteAsync(Key(sid!));
+        foreach (var sid in sids)
+        {
+            await _redis.KeyDeleteAsync(Key(sid!));
+            await _redis.KeyDeleteAsync(ClientsKey(sid!));
+        }
         await _redis.KeyDeleteAsync(UserKey(userId));
+    }
+
+    public async Task AddClientAsync(string sessionId, string clientId, CancellationToken ct = default)
+    {
+        await _redis.SetAddAsync(ClientsKey(sessionId), clientId);
+        // Outlive the session a touch so a logout fired right at TTL can still resolve the set.
+        await _redis.KeyExpireAsync(ClientsKey(sessionId), TimeSpan.FromHours(12));
+    }
+
+    public async Task<IReadOnlyCollection<string>> GetClientsAsync(string sessionId, CancellationToken ct = default)
+        => (await _redis.SetMembersAsync(ClientsKey(sessionId))).Select(v => v.ToString()).ToArray();
+
+    public async Task<IReadOnlyDictionary<string, string[]>> GetUserSessionClientsAsync(Guid userId, CancellationToken ct = default)
+    {
+        var sids = await _redis.SetMembersAsync(UserKey(userId));
+        var map = new Dictionary<string, string[]>();
+        foreach (var sid in sids)
+        {
+            var clients = await _redis.SetMembersAsync(ClientsKey(sid!));
+            if (clients.Length > 0) map[sid!] = clients.Select(c => c.ToString()).ToArray();
+        }
+        return map;
     }
 
     private static string Key(string sid) => $"sess:{sid}";
     private static string UserKey(Guid userId) => $"user:sids:{userId}";
+    private static string ClientsKey(string sid) => $"sess:clients:{sid}";
 }
 
 // ----------------------------------------------------------------------------
@@ -197,6 +232,7 @@ public interface IUserService
     Task<AppUser?> ValidatePasswordAsync(string username, string password, CancellationToken ct = default);
     Task<AppUser?> GetAsync(Guid id, CancellationToken ct = default);
     Task<AppUser?> FindByEmailAsync(string email, CancellationToken ct = default);
+    Task<AppUser?> FindByWebAuthnCredentialAsync(string credentialId, CancellationToken ct = default);
     Task<AppUser?> CreateUserAsync(string username, string email, string password, CancellationToken ct = default);
     Task MarkEmailVerifiedAsync(Guid userId, CancellationToken ct = default);
     Task<AppUser> FindOrCreateFederatedAsync(string email, string externalSubject, CancellationToken ct = default);
@@ -228,6 +264,12 @@ public sealed class UserService : IUserService
 
     public Task<AppUser?> FindByEmailAsync(string email, CancellationToken ct = default)
         => _db.Users.FirstOrDefaultAsync(x => x.Email == email && x.IsActive, ct);
+
+    // Passwordless login: resolve the user (with factors) owning a given WebAuthn credential id.
+    public Task<AppUser?> FindByWebAuthnCredentialAsync(string credentialId, CancellationToken ct = default)
+        => _db.Users.Include(x => x.MfaMethods)
+            .FirstOrDefaultAsync(x => x.IsActive && x.MfaMethods.Any(
+                m => m.Kind == MfaKind.WebAuthn && m.SecretRef == credentialId), ct);
 
     public async Task<AppUser?> CreateUserAsync(string username, string email, string password, CancellationToken ct = default)
     {

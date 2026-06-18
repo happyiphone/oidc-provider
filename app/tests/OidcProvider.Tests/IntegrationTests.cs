@@ -293,7 +293,7 @@ public sealed class IntegrationTests : IClassFixture<OidcAppFactory>
         Assert.Contains("/account/login", c2After.Headers.Location!.ToString());
     }
 
-    [Fact] // RP-initiated logout: redirect to a registered URI + session terminated
+    [Fact] // RP-initiated logout: front-channel fan-out page → post-logout URI + session terminated
     public async Task RpInitiated_logout_redirects_and_clears_session()
     {
         var c = NewClient();
@@ -304,8 +304,12 @@ public sealed class IntegrationTests : IClassFixture<OidcAppFactory>
 
         var res = await c.GetAsync($"/logout?id_token_hint={idt}" +
             $"&post_logout_redirect_uri={Uri.EscapeDataString("http://localhost:5000/signed-out")}&state=xyz");
-        Assert.Equal(HttpStatusCode.Redirect, res.StatusCode);
-        Assert.Contains("signed-out", res.Headers.Location!.ToString());
+        // demo-web registers a front-channel logout URI, so end-session returns the iframe page
+        // that logs the RP out in a hidden frame and then bounces to the post_logout_redirect_uri.
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var html = await res.Content.ReadAsStringAsync();
+        Assert.Contains("frontchannel-logout", html);   // RP logged out in a hidden iframe (FCL 1.0)
+        Assert.Contains("signed-out", html);            // then redirected to the registered post-logout URI
 
         var after = await c.GetAsync("/account/consents");   // session gone → bounce to login
         Assert.Equal(HttpStatusCode.Redirect, after.StatusCode);

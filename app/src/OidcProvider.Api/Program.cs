@@ -24,13 +24,22 @@ using static OpenIddict.Abstractions.OpenIddictConstants;
 var builder = WebApplication.CreateBuilder(args);
 var cfg = builder.Configuration;
 
+// ---- Redis (ephemeral store, ADR-0006) -------------------------------------
+// One multiplexer shared by the session/throttle stores AND the DataProtection key-ring below.
+var redisMux = ConnectionMultiplexer.Connect(cfg.GetConnectionString("Redis")!);
+builder.Services.AddSingleton<IConnectionMultiplexer>(redisMux);
+
 // Persist DataProtection keys so cookies (auth, correlation, nonce, antiforgery) survive a
 // restart and are shared across instances — otherwise a restart invalidates every in-flight
-// login (the classic "Correlation failed"). Prod: a shared/persisted keystore + KMS-wrapped.
-builder.Services.AddDataProtection()
-    .PersistKeysToFileSystem(new DirectoryInfo(
-        cfg["DataProtection:KeyPath"] ?? Path.Combine(Path.GetTempPath(), "oidc-provider-dpkeys")))
-    .SetApplicationName("oidc-provider");
+// login (the classic "Correlation failed"). FileSystem is fine for a single dev instance, but
+// horizontal scaling needs a SHARED keystore: DataProtection:Store=Redis puts the key-ring in
+// Redis so every replica encrypts/decrypts with the same keys. (Prod additionally KMS-wraps it.)
+var dp = builder.Services.AddDataProtection().SetApplicationName("oidc-provider");
+if (string.Equals(cfg["DataProtection:Store"], "Redis", StringComparison.OrdinalIgnoreCase))
+    dp.PersistKeysToStackExchangeRedis(redisMux, "oidc-provider:dataprotection-keys");
+else
+    dp.PersistKeysToFileSystem(new DirectoryInfo(
+        cfg["DataProtection:KeyPath"] ?? Path.Combine(Path.GetTempPath(), "oidc-provider-dpkeys")));
 
 // ---- Data: Postgres + OpenIddict's protocol tables -------------------------
 builder.Services.AddDbContext<AuthDbContext>(o =>
@@ -38,10 +47,6 @@ builder.Services.AddDbContext<AuthDbContext>(o =>
     o.UseNpgsql(cfg.GetConnectionString("Postgres"));
     o.UseOpenIddict();
 });
-
-// ---- Redis (ephemeral store, ADR-0006) -------------------------------------
-builder.Services.AddSingleton<IConnectionMultiplexer>(
-    _ => ConnectionMultiplexer.Connect(cfg.GetConnectionString("Redis")!));
 
 // ---- Domain services -------------------------------------------------------
 builder.Services.Configure<OidcSigningConfig>(cfg.GetSection("Oidc:Signing"));
@@ -63,11 +68,19 @@ builder.Services.AddScoped<IUserService, UserService>();
 builder.Services.AddScoped<ISigningKeyStore, EfSigningKeyStore>();
 builder.Services.AddScoped<IOpenIddictTokenManagerFacade, TokenFamilyFacade>();
 builder.Services.AddScoped<IAuditLog, EfAuditLog>();          // threat T16 — tamper-evident audit
+builder.Services.AddScoped<IBackChannelLogoutNotifier, BackChannelLogoutNotifier>(); // OIDC BCL 1.0
+builder.Services.AddHttpClient("backchannel-logout", c => c.Timeout = TimeSpan.FromSeconds(5));
 builder.Services.AddSingleton<IUserSession, RedisUserSession>();
 builder.Services.AddSingleton<ILoginThrottle, RedisLoginThrottle>();   // brute-force lockout
 builder.Services.AddSingleton<IDpopValidator, DpopValidator>();        // DPoP (RFC 9449)
 builder.Services.AddSingleton<ITokenLinkStore, RedisTokenLinkStore>(); // email-verify / reset links
-builder.Services.AddSingleton<IEmailSender, DevEmailSender>();         // PROD: swap for SMTP/provider
+// Email: Email:Mode=Smtp wires the MailKit-backed sender (prod); anything else keeps the dev
+// in-memory sink that powers /dev/emails and the onboarding tests.
+builder.Services.Configure<EmailOptions>(cfg.GetSection("Email"));
+if (string.Equals(cfg["Email:Mode"], "Smtp", StringComparison.OrdinalIgnoreCase))
+    builder.Services.AddSingleton<IEmailSender, SmtpEmailSender>();
+else
+    builder.Services.AddSingleton<IEmailSender, DevEmailSender>();
 builder.Services.AddSingleton<ITotpService, TotpService>();
 builder.Services.AddSingleton(new WebAuthnConfig
 {
@@ -135,15 +148,23 @@ builder.Services.AddOpenIddict()
          .SetIntrospectionEndpointUris("introspect")
          .SetRevocationEndpointUris("revoke")
          .SetEndSessionEndpointUris("logout")
-         .SetPushedAuthorizationEndpointUris("par"); // RFC 9126 (ADR-0009)
+         .SetPushedAuthorizationEndpointUris("par")          // RFC 9126 (ADR-0009)
+         .SetDeviceAuthorizationEndpointUris("device")       // RFC 8628 device grant
+         .SetEndUserVerificationEndpointUris("device/verify");
 
         // ADR-0001: only the safe grants. Implicit / password deliberately absent.
         o.AllowAuthorizationCodeFlow()
          .AllowRefreshTokenFlow()
-         .AllowClientCredentialsFlow();
+         .AllowClientCredentialsFlow()
+         .AllowDeviceAuthorizationFlow()                     // RFC 8628 (input-constrained devices)
+         .AllowCustomFlow(OidcProvider.Api.Controllers.Ciba.GrantType)              // CIBA poll mode
+         .AllowCustomFlow(OidcProvider.Api.Controllers.TokenController.TokenExchangeGrant); // RFC 8693
 
-        // ADR-0001/0011: PKCE mandatory; OpenIddict enforces S256.
-        o.RequireProofKeyForCodeExchange();
+        // ADR-0001/0011: PKCE mandatory by default; set Oidc:Pkce:Required=false to relax for the
+        // legacy OIDC Basic profile (still S256-only when a challenge is supplied — guarded in
+        // AuthorizeController). Production keeps the default.
+        if (cfg.GetValue("Oidc:Pkce:Required", true))
+            o.RequireProofKeyForCodeExchange();
 
         o.RegisterScopes(Scopes.OpenId, Scopes.Email, Scopes.Profile, Scopes.OfflineAccess, "api");
 
@@ -163,6 +184,32 @@ builder.Services.AddOpenIddict()
         // private_key_jwt jti single-use (RFC 7523); runs after assertion validation.
         o.AddEventHandler<OpenIddictServerEvents.ProcessAuthenticationContext>(
             b => b.UseScopedHandler<ClientAssertionReplayHandler>().SetOrder(1_000_000));
+        // RFC 8693: the token response for a token-exchange MUST carry issued_token_type.
+        o.AddEventHandler<OpenIddictServerEvents.ApplyTokenResponseContext>(b => b.UseInlineHandler(ctx =>
+        {
+            if (ctx.Transaction.Request?.GrantType == OidcProvider.Api.Controllers.TokenController.TokenExchangeGrant
+                && ctx.Response is { } r && string.IsNullOrEmpty(r.Error))
+                r["issued_token_type"] = "urn:ietf:params:oauth:token-type:access_token";
+            return default;
+        }));
+        // OIDC Session Management: attach session_state to a successful authorization response. The
+        // check_session iframe recomputes it from the opbs cookie to detect logout/login at the OP.
+        o.AddEventHandler<OpenIddictServerEvents.ApplyAuthorizationResponseContext>(b => b.UseInlineHandler(ctx =>
+        {
+            if (!string.IsNullOrEmpty(ctx.Response.Code) && ctx.Transaction.GetHttpRequest() is { } http)
+            {
+                var clientId = ctx.Transaction.Request?.ClientId ?? "";
+                var origin = Uri.TryCreate(ctx.Transaction.Request?.RedirectUri, UriKind.Absolute, out var u)
+                    ? u.GetLeftPart(UriPartial.Authority) : "";
+                var opbs = http.Cookies["opbs"] ?? "";
+                var salt = OidcProvider.Core.Base64UrlText.Encode(
+                    System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
+                var hash = OidcProvider.Core.Base64UrlText.Encode(System.Security.Cryptography.SHA256.HashData(
+                    System.Text.Encoding.UTF8.GetBytes($"{clientId} {origin} {opbs} {salt}")));
+                ctx.Response["session_state"] = $"{hash}.{salt}";
+            }
+            return default;
+        }).SetOrder(int.MinValue + 500_000)); // before the ASP.NET response-emit handlers
 
         // Advertise the custom registration endpoint and our DPoP support in discovery so
         // metadata matches what we actually implement (OIDF conformance checks this).
@@ -173,8 +220,32 @@ builder.Services.AddOpenIddict()
                 if (ctx.Transaction.GetHttpRequest() is { } httpReq)
                     ctx.Metadata["registration_endpoint"] = $"{httpReq.Scheme}://{httpReq.Host}/register";
                 ctx.Metadata["dpop_signing_alg_values_supported"] = new[] { "ES256" };
+                // OIDC Back-Channel + Front-Channel Logout 1.0 discovery metadata.
+                ctx.Metadata["backchannel_logout_supported"] = true;
+                ctx.Metadata["backchannel_logout_session_supported"] = true;
+                ctx.Metadata["frontchannel_logout_supported"] = true;
+                ctx.Metadata["frontchannel_logout_session_supported"] = true;
+                // JAR (RFC 9101): we accept signed request objects (validated in JarMiddleware).
+                ctx.Metadata["request_parameter_supported"] = true;
+                ctx.Metadata["request_object_signing_alg_values_supported"] = new[] { "ES256", "RS256" };
+                // JARM (RFC 9101 response side): signed JWT authorization responses.
+                ctx.Metadata["response_modes_supported"] = new[]
+                    { "query", "fragment", "form_post", "query.jwt", "fragment.jwt", "form_post.jwt", "jwt" };
+                ctx.Metadata["authorization_signing_alg_values_supported"] = new[] { "ES256" };
+                // CIBA (poll mode) discovery metadata.
+                if (ctx.Transaction.GetHttpRequest() is { } hr2)
+                    ctx.Metadata["backchannel_authentication_endpoint"] = $"{hr2.Scheme}://{hr2.Host}/ciba";
+                ctx.Metadata["backchannel_token_delivery_modes_supported"] = new[] { "poll" };
+                ctx.Metadata["backchannel_user_code_parameter_supported"] = false;
+                // RFC 8705: we issue certificate-bound (mTLS) access tokens (cnf.x5t#S256).
+                ctx.Metadata["tls_client_certificate_bound_access_tokens"] = true;
+                // OIDC Session Management 1.0.
+                if (ctx.Transaction.GetHttpRequest() is { } hr3)
+                    ctx.Metadata["check_session_iframe"] = $"{hr3.Scheme}://{hr3.Host}/connect/check_session";
                 return default;
-            }));
+            // Run AFTER OpenIddict's own metadata handler, which otherwise resets
+            // request_parameter_supported back to false (it has no native JAR support).
+            }).SetOrder(int.MaxValue - 1_000));
 
         // ADR-0009 (when supported by your OpenIddict version): require PAR + DPoP per client.
         // o.RequirePushedAuthorizationRequests();
@@ -184,7 +255,8 @@ builder.Services.AddOpenIddict()
          .EnableAuthorizationEndpointPassthrough()   // our AuthorizeController handles login/consent
          .EnableTokenEndpointPassthrough()           // our TokenController augments token issuance
          .EnableUserInfoEndpointPassthrough()
-         .EnableEndSessionEndpointPassthrough();
+         .EnableEndSessionEndpointPassthrough()
+         .EnableEndUserVerificationEndpointPassthrough();    // our DeviceController renders the code-entry/consent UI
 
         // Dev only: allow plain HTTP. NEVER do this in production (ADR/threat model).
         if (builder.Environment.IsDevelopment())
@@ -294,6 +366,12 @@ app.Use(async (ctx, next) =>
     }
     await next();
 });
+
+// JAR + JARM (RFC 9101): validate a signed `request` object and/or wrap the response as a signed
+// JWT, around OpenIddict. Scoped to /authorize; requests using neither feature pass through.
+app.UseWhen(
+    ctx => ctx.Request.Path.StartsWithSegments("/authorize"),
+    branch => branch.UseMiddleware<JarMiddleware>());
 
 app.UseAuthentication();
 app.UseAuthorization();

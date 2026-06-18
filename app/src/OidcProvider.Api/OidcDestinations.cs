@@ -9,10 +9,12 @@ public static class OidcDestinations
 {
     public static IEnumerable<string> For(Claim claim) => claim.Type switch
     {
-        Claims.Name or Claims.Email or Claims.EmailVerified
+        Claims.Name or Claims.Email or Claims.EmailVerified or "sid" or "auth_time"
             => new[] { Destinations.IdentityToken },
         "acr" or "amr"
             => new[] { Destinations.IdentityToken, Destinations.AccessToken },
+        "authorization_details"   // RFC 9396 — the structured grant lives in the access token
+            => new[] { Destinations.AccessToken },
         _ => new[] { Destinations.AccessToken },
     };
 }

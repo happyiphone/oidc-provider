@@ -22,12 +22,13 @@ public sealed class AccountController : Controller
     private readonly ILoginThrottle _throttle;
     private readonly IConsentStore _consents;
     private readonly IAuditLog _audit;
+    private readonly IBackChannelLogoutNotifier _bcl;
     private readonly IConfiguration _cfg;
     public AccountController(IUserService users, IUserSession sessions, ITotpService totp,
         IWebAuthnService webauthn, ILoginThrottle throttle, IConsentStore consents, IAuditLog audit,
-        IConfiguration cfg)
-        => (_users, _sessions, _totp, _webauthn, _throttle, _consents, _audit, _cfg)
-           = (users, sessions, totp, webauthn, throttle, consents, audit, cfg);
+        IBackChannelLogoutNotifier bcl, IConfiguration cfg)
+        => (_users, _sessions, _totp, _webauthn, _throttle, _consents, _audit, _bcl, _cfg)
+           = (users, sessions, totp, webauthn, throttle, consents, audit, bcl, cfg);
 
     [HttpGet("/account/login")]
     public IActionResult LoginPage([FromQuery] string? returnUrl)
@@ -114,14 +115,104 @@ public sealed class AccountController : Controller
         return Redirect(returnUrl ?? "/");
     }
 
-    // ---- WebAuthn / FIDO2 assertion (second factor) ----
+    // ---- WebAuthn / FIDO2 ----
+    // Shared JS: base64url <-> ArrayBuffer helpers used by both ceremonies.
+    private const string WebAuthnJs = @"
+const b2b=b=>{let s='';for(const x of new Uint8Array(b))s+=String.fromCharCode(x);return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');};
+const u2b=s=>{s=s.replace(/-/g,'+').replace(/_/g,'/');s+='='.repeat((4-s.length%4)%4);const d=atob(s),a=new Uint8Array(d.length);for(let i=0;i<d.length;i++)a[i]=d.charCodeAt(i);return a.buffer;};
+function msg(t){document.getElementById('msg').textContent=t;}";
+
+    // Security page: enroll a passkey / security key from the browser (real
+    // navigator.credentials.create → attestation → /account/webauthn/register).
+    [HttpGet("/account/security")]
+    public IActionResult Security()
+        => Content(
+            "<!doctype html><meta charset=utf-8><title>Security</title>" +
+            "<h1>Security keys / passkeys</h1>" +
+            "<p>Register a passkey or hardware security key as a second factor.</p>" +
+            "<button id=reg>Register a passkey</button> <span id=msg></span>" +
+            "<script>" + WebAuthnJs + @"
+document.getElementById('reg').onclick=async()=>{
+  try{
+    msg('…');
+    const o=await (await fetch('/account/webauthn/register/options',{method:'POST'})).json();
+    const c=await navigator.credentials.create({publicKey:{
+      challenge:u2b(o.challenge), rp:{id:o.rpId,name:o.rpName},
+      user:{id:u2b(o.userId),name:o.userName,displayName:o.userName},
+      pubKeyCredParams:[{type:'public-key',alg:-7}],
+      // residentKey:required → a discoverable passkey, usable for usernameless/passwordless login.
+      authenticatorSelection:{residentKey:'required',requireResidentKey:true,userVerification:'preferred'},
+      attestation:'none', timeout:60000}});
+    const r=await fetch('/account/webauthn/register',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({Id:c.id,AttestationObject:b2b(c.response.attestationObject),ClientDataJSON:b2b(c.response.clientDataJSON)})});
+    msg(r.ok?'✅ Passkey registered':'❌ '+(await r.text()));
+  }catch(e){msg('❌ '+e);}
+};
+</script>", "text/html");
+
+    // MFA step-up page: prove possession of an enrolled passkey
+    // (navigator.credentials.get → assertion → /account/webauthn).
     [HttpGet("/account/webauthn-page")]
     public IActionResult WebAuthnPage([FromQuery] string? returnUrl)
         => Content(
             "<!doctype html><meta charset=utf-8><title>Security key</title>" +
-            "<p>Use your security key / passkey. (A real UI calls <code>navigator.credentials.get()</code> " +
-            "against <code>/account/webauthn/options</code> then posts the assertion to " +
-            "<code>/account/webauthn</code>.)</p>", "text/html");
+            "<h1>Second factor</h1><p>Use your passkey / security key.</p>" +
+            "<button id=go>Use security key</button> <span id=msg></span>" +
+            "<script>" + WebAuthnJs + @"
+async function auth(){
+  try{
+    msg('…');
+    const o=await (await fetch('/account/webauthn/options',{method:'POST'})).json();
+    const a=await navigator.credentials.get({publicKey:{
+      challenge:u2b(o.challenge), rpId:o.rpId,
+      allowCredentials:[{type:'public-key',id:u2b(o.credentialId)}],
+      userVerification:'discouraged', timeout:60000}});
+    const ru=new URLSearchParams(location.search).get('returnUrl')||'/';
+    const r=await fetch('/account/webauthn?returnUrl='+encodeURIComponent(ru),{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({Id:a.id,AuthenticatorData:b2b(a.response.authenticatorData),ClientDataJSON:b2b(a.response.clientDataJSON),Signature:b2b(a.response.signature)})});
+    if(r.ok){const j=await r.json();location.href=j.returnUrl||'/';}else{msg('❌ '+(await r.text()));}
+  }catch(e){msg('❌ '+e);}
+}
+document.getElementById('go').onclick=auth; auth();
+</script>", "text/html");
+
+    // ---- Passwordless / passkey-as-primary login (usernameless WebAuthn) ----
+    [HttpPost("/account/webauthn/login/options")]
+    public async Task<IActionResult> WebAuthnLoginOptions()
+    {
+        var key = OidcProvider.Core.Base64UrlText.Encode(
+            System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
+        Response.Cookies.Append("wa_login", key, new CookieOptions
+        {
+            HttpOnly = true,
+            SameSite = SameSiteMode.Lax,
+            Secure = Request.IsHttps,   // dev http: not secure; prod https: secure
+            MaxAge = TimeSpan.FromMinutes(5),
+        });
+        return Ok(await _webauthn.NewLoginOptionsAsync(key));
+    }
+
+    [HttpPost("/account/webauthn/login")]
+    public async Task<IActionResult> WebAuthnLogin([FromBody] WebAuthnAssertion assertion,
+        [FromQuery] string? returnUrl)
+    {
+        var key = Request.Cookies["wa_login"];
+        if (string.IsNullOrEmpty(key)) return BadRequest(new { error = "no_challenge" });
+        var user = await _users.FindByWebAuthnCredentialAsync(assertion.Id);
+        var cred = user?.MfaMethods.FirstOrDefault(m => m.Kind == MfaKind.WebAuthn && m.SecretRef == assertion.Id);
+        if (user is null || cred is null) return BadRequest(new { error = "unknown_credential" });
+
+        if (!await _webauthn.VerifyAssertionAsync(key, cred, assertion))
+            return BadRequest(new { error = "assertion_failed" });
+
+        await _users.SaveAsync();                       // persist signCount (clone detection)
+        Response.Cookies.Delete("wa_login");
+        // Passwordless passkey is phishing-resistant → treat as strong (MFA-level) auth.
+        await EstablishSessionAsync(user.Id, AcrPolicy.Mfa, new[] { "webauthn" });
+        await _audit.WriteAsync("login.passwordless", user.Id);
+        return Ok(new { ok = true, returnUrl = returnUrl ?? "/" });
+    }
 
     [HttpPost("/account/webauthn/register/options")]
     public async Task<IActionResult> WebAuthnRegisterOptions()
@@ -206,8 +297,11 @@ public sealed class AccountController : Controller
     {
         var (_, session) = await CurrentSessionAsync();
         if (session is null) return Unauthorized();
+        // Snapshot every session's RPs BEFORE the change wipes them, so we can notify them after.
+        var sessionClients = await _sessions.GetUserSessionClientsAsync(session.UserId);
         if (!await _users.ChangePasswordAsync(session.UserId, currentPassword ?? "", newPassword ?? ""))
             return BadRequest(new { error = "password_change_failed" });
+        await _bcl.NotifyAllSessionsAsync(session.UserId, sessionClients); // BCL across all devices
         await _audit.WriteAsync("password.changed", session.UserId);
         await EstablishSessionAsync(session.UserId, session.Acr, session.Amr); // fresh session here
         return Ok();
@@ -220,7 +314,9 @@ public sealed class AccountController : Controller
     {
         var (_, session) = await CurrentSessionAsync();
         if (session is null) return Unauthorized();
+        var sessionClients = await _sessions.GetUserSessionClientsAsync(session.UserId); // before revoke
         await _users.RevokeAllForUserAsync(session.UserId);   // tokens (all PPIDs) + all sessions
+        await _bcl.NotifyAllSessionsAsync(session.UserId, sessionClients); // notify every RP, every device
         await _audit.WriteAsync("logout.all", session.UserId);
         await HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
         return Ok();
@@ -263,5 +359,15 @@ public sealed class AccountController : Controller
         identity.AddClaim(new Claim(ClaimTypes.NameIdentifier, userId.ToString()));
         await HttpContext.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme,
             new ClaimsPrincipal(identity), new AuthenticationProperties { IsPersistent = false });
+
+        // OIDC Session Management: the OP browser-state cookie (readable by the check_session_iframe
+        // JS, hence NOT HttpOnly). It changes every login, so a new sid → "changed" at the RP.
+        Response.Cookies.Append("opbs", sid, new CookieOptions
+        {
+            HttpOnly = false,
+            SameSite = Request.IsHttps ? SameSiteMode.None : SameSiteMode.Lax, // None+Secure for the cross-site iframe in prod
+            Secure = Request.IsHttps,
+            MaxAge = TimeSpan.FromHours(8),
+        });
     }
 }

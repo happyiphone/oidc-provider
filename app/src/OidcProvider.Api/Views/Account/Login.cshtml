@@ -13,6 +13,9 @@
     <input type="password" id="password" name="password" autocomplete="current-password" />
     <button type="submit">Continue</button>
 </form>
+<p style="margin-top:1rem">
+    <button type="button" id="passkey">🔑 Sign in with a passkey</button> <span id="pkmsg"></span>
+</p>
 @if (!string.IsNullOrEmpty(Model.FederationName))
 {
     <p style="margin-top:1rem">
@@ -20,3 +23,20 @@
     </p>
 }
 <p class="muted">Demo: <code>alice / password123!</code> &middot; <code>bob / password123!</code> (TOTP)</p>
+<script>
+const _b=b=>{let s='';for(const x of new Uint8Array(b))s+=String.fromCharCode(x);return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');};
+const _u=s=>{s=s.replace(/-/g,'+').replace(/_/g,'/');s+='='.repeat((4-s.length%4)%4);const d=atob(s),a=new Uint8Array(d.length);for(let i=0;i<d.length;i++)a[i]=d.charCodeAt(i);return a.buffer;};
+document.getElementById('passkey').onclick=async()=>{
+  const m=document.getElementById('pkmsg'); m.textContent='…';
+  try{
+    const o=await (await fetch('/account/webauthn/login/options',{method:'POST'})).json();
+    // No allowCredentials → the browser offers any discoverable passkey for this RP (usernameless).
+    const a=await navigator.credentials.get({publicKey:{challenge:_u(o.challenge),rpId:o.rpId,userVerification:'preferred'}});
+    const ru=@Html.Raw(System.Text.Json.JsonSerializer.Serialize(Model.ReturnUrl ?? "/"));
+    const r=await fetch('/account/webauthn/login?returnUrl='+encodeURIComponent(ru),{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({Id:a.id,AuthenticatorData:_b(a.response.authenticatorData),ClientDataJSON:_b(a.response.clientDataJSON),Signature:_b(a.response.signature)})});
+    if(r.ok){location.href=(await r.json()).returnUrl||'/';}else{m.textContent='❌ '+(await r.text());}
+  }catch(e){m.textContent='❌ '+e;}
+};
+</script>

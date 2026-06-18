@@ -60,6 +60,51 @@ are seeded:
 Discovery: `http://localhost:8080/.well-known/openid-configuration` ·
 JWKS: `http://localhost:8080/jwks` (served by OpenIddict).
 
+## Production configuration
+
+The dev defaults boot with zero external dependencies; production flips three switches via
+config (env vars shown — `Section__Key` form):
+
+| Concern | Dev default | Production setting | Why |
+|---|---|---|---|
+| **DataProtection key-ring** (auth/correlation/nonce/antiforgery cookies) | `DataProtection:Store=FileSystem` (per-instance, under temp) | `DataProtection__Store=Redis` | A filesystem ring is local to one instance — a second replica (or a restart on fresh storage) can't decrypt cookies, giving "Correlation failed". Redis makes the ring **shared + durable**: every replica encrypts/decrypts with the same key. Verified: key id survives a restart. |
+| **Transactional email** (verify-email / password-reset links) | `Email:Mode=Dev` (in-memory sink behind `/dev/emails`) | `Email__Mode=Smtp` + `Email__Smtp__{Host,Port,User,Password,Security}` + `Email__From` | The dev sink never sends mail. SMTP mode uses a MailKit-backed sender (`SmtpEmailSender`). `Security` ∈ `None│StartTls│StartTlsWhenAvailable│SslOnConnect│Auto`. |
+| **Signing keys** | `Oidc:Signing:Mode=Dev` (ephemeral ES256) | `Oidc__Signing__Mode=Kms` + KMS region/key | Dev key rotates on restart (invalidates issued tokens); KMS gives durable, custody-controlled signing + the 3-state rotation worker. |
+
+Also required outside Development (fail-fast if unset): `Oidc__PpidKeyBase64` (pairwise-subject
+derivation key). DataProtection at rest should additionally be KMS-wrapped in prod.
+
+## Hardening pass (additions, all runtime-verified)
+
+Built and verified after the initial implementation:
+
+| Capability | What | Verification |
+|---|---|---|
+| **SMTP email** | `Email:Mode=Smtp` → MailKit `SmtpEmailSender` (dev sink stays default) | Drove signup → real SMTP transaction captured at a local sink; verify link consumed |
+| **Durable DataProtection** | `DataProtection:Store=Redis` shares the cookie key-ring across instances | Key-ring written to Redis; **same key id survives a restart** |
+| **Back-channel logout (OIDC BCL 1.0)** | signed `logout_token` to every RP a session/credential-change touches | login→logout fans out a token the demo RP validates + uses to kill its session; one logout-all → both of two sessions notified; bad sig/`nonce`/missing-event rejected |
+| **Front-channel logout (OIDC FCL 1.0)** | end-session iframe page hits each RP's `frontchannel_logout_uri` (`iss`+`sid`) | `/logout` returns the iframe page carrying the session's sid; loading it terminates the RP session; receipt recorded |
+| **WebAuthn browser registration** | real `navigator.credentials.create()` page + functional step-up assertion page | Playwright + CDP **virtual authenticator**: enroll passkey → log in via RP with it as 2FA (`acr=urn:acr:mfa`, `amr=webauthn`) |
+| **Device flow (RFC 8628)** | `/device` + `/device/verify` end-user verification UI, `device_code` grant | device→pending poll→user approves→token poll returns access+id+refresh, `aud=svc-device` |
+| **Admin console** | `/admin/ui` browser client management (list/delete) | sign-in gate, list seeded+dynamic, delete throwaway, wrong-key rejected |
+| **Dynamic-registration BCL** | `/register` accepts `backchannel_logout_uri`/`frontchannel_logout_uri`/`jwks` | 201 + echoed; non-absolute URI → 400 |
+| **JAR (RFC 9101 request)** | signed `request` object validated against the client JWKS, expanded for OpenIddict (middleware) | valid → accepted (login); tampered + wrong-key → 400 `invalid_request_object` |
+| **JARM (RFC 9101 response)** | `response_mode=*.jwt` → authorization response wrapped in a signed JWT (`response=`) | drove `query.jwt` → final redirect carries only `response`; JWT verifies (ES256, iss/aud, code+state) |
+| **CIBA (poll mode)** | `/ciba` backchannel auth + custom grant; tokens minted by OpenIddict via SignIn | initiate→pending→out-of-band approve→tokens; single-use `auth_req_id` enforced |
+| **Resource Indicators (RFC 8707)** | `resource` param → audience-restricted access token | client-credentials with `resource=` → access-token `aud` = that resource |
+| **Dynamic client mgmt (RFC 7592)** | registration access token gates GET/DELETE of a registered client | read 200 with RAT; wrong token 401; delete 204; gone after |
+| **Token Exchange (RFC 8693)** | custom grant: swap a token we issued for a downscoped/delegated one (`act`) | subject token → new token (`aud` downstream, `issued_token_type`); bad subject → invalid_grant |
+| **Rich Auth Requests (RFC 9396)** | `authorization_details` carried into the access token (JSON array) | code flow → access token carries the structured grant array |
+| **mTLS bound tokens (RFC 8705)** | forwarded client cert → `cnf.x5t#S256` (cert-bound access token) | `X-Client-Cert` → `cnf.x5t#S256` == cert SHA-256 |
+| **Passwordless passkey login** | usernameless discoverable-credential login (passkey as primary) | register resident passkey → log out → sign in with no username/password |
+| **Session Management 1.0** | `check_session_iframe` + `session_state` + `opbs` cookie | iframe JS served; `session_state` in authz response; opbs set on login |
+
+**Now implemented around OpenIddict** (it lacks native support, so these are bounded add-ons that
+don't reimplement the core): **JAR + JARM** (RFC 9101) via a `/authorize` pre/post middleware, and
+**CIBA** poll mode (RFC) via a custom flow whose tokens are still minted by OpenIddict. The only
+remaining item is a fully-green **OIDF Basic-OP certification** run — it needs an interactive
+browser login/consent step against the conformance suite (an operational sign-off, not code).
+
 ## Project layout
 
 ```
@@ -130,6 +175,22 @@ provider TLS-fronted to an HTTPS issuer, dev CA trusted by the suite, suite fetc
 discovery/JWKS over trusted HTTPS, and the run found+fixed a real metadata bug. A fully
 green **Basic OP** certification still needs interactive browser login/consent (an
 operational step), documented in `conformance/`.
+
+**Back-channel logout (OIDC BCL 1.0)** — implemented and verified end to end. The OP tracks
+which RPs join each session (`sess:clients:{sid}` in Redis), and on RP-initiated logout mints a
+signed `logout_token` (typ=`logout+jwt`, `events` member set, `sub`=that RP's pairwise subject,
+`sid`, `jti`, no `nonce`) and POSTs it to each RP's registered `backchannel_logout_uri`. The
+`sid` is also emitted in the id_token so the RP can match the session. Opt-in via the seeder,
+admin, or dynamic registration (`backchannel_logout_uri`); advertised in discovery
+(`backchannel_logout_supported`/`_session_supported`). Verified: login→logout fans out a token
+the demo RP validates (signature/iss/aud/events, rejects `nonce` and bad signatures) and uses to
+kill its own session. The fan-out also covers **credential-change paths** — a password change,
+a password reset, and "log out everywhere" notify *every* RP across *all* of the user's sessions
+(verified: one logout-all → both of two sessions' RPs notified). **Front-channel logout
+(OIDC FCL 1.0)** is also implemented as a complement: end-session renders a hidden-iframe page
+hitting each RP's `frontchannel_logout_uri` with `iss`+`sid`, so the RP can terminate the exact
+session even when third-party-cookie rules hide its cookie. Both channels fire together;
+advertised via `frontchannel_logout_supported`/`_session_supported`.
 
 **Still deferred (only this):**
 - **DPoP** ([ADR-0009](../docs/oidc-provider/adr/0009-sender-constraining.md)) — **not**

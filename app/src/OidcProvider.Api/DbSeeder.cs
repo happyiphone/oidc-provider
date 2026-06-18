@@ -49,6 +49,19 @@ public static class DbSeeder
                     Permissions.Prefixes.Scope + "openid",
                     Permissions.Prefixes.Scope + Scopes.OfflineAccess, // enable refresh tokens (ADR-0007)
                 },
+                // Back-channel logout (OIDC BCL 1.0): the OP POSTs a logout_token here when a
+                // session this RP joined ends. 5050 is the demo RP's receiver.
+                Properties =
+                {
+                    ["backchannel_logout_uri"] =
+                        System.Text.Json.JsonSerializer.SerializeToElement("http://localhost:5050/backchannel-logout"),
+                    ["backchannel_logout_session_required"] =
+                        System.Text.Json.JsonSerializer.SerializeToElement(true),
+                    ["frontchannel_logout_uri"] =
+                        System.Text.Json.JsonSerializer.SerializeToElement("http://localhost:5050/frontchannel-logout"),
+                    ["frontchannel_logout_session_required"] =
+                        System.Text.Json.JsonSerializer.SerializeToElement(true),
+                },
                 Requirements = { Requirements.Features.ProofKeyForCodeExchange }, // PKCE mandatory (ADR-0011)
             });
         }
@@ -224,6 +237,72 @@ public static class DbSeeder
         }
         if (!db.ClientPolicies.Any(p => p.ClientId == svcDpop))
             db.ClientPolicies.Add(new ClientPolicy { ClientId = svcDpop, DpopBound = true });
+
+        // Device-flow client (RFC 8628) — a public, input-constrained client (TV/CLI). No secret,
+        // no redirect; obtains tokens via device_code after the user approves at /device/verify.
+        const string svcDevice = "svc-device";
+        if (await apps.FindByClientIdAsync(svcDevice) is null)
+        {
+            await apps.CreateAsync(new OpenIddictApplicationDescriptor
+            {
+                ClientId = svcDevice,
+                ClientType = ClientTypes.Public,
+                ConsentType = ConsentTypes.Explicit,
+                DisplayName = "Device-flow client (CLI/TV)",
+                Permissions =
+                {
+                    Permissions.Endpoints.DeviceAuthorization,
+                    Permissions.Endpoints.Token,
+                    Permissions.GrantTypes.DeviceCode,
+                    Permissions.GrantTypes.RefreshToken,
+                    Permissions.Prefixes.Scope + "openid",
+                    Permissions.Scopes.Email, Permissions.Scopes.Profile,
+                    Permissions.Prefixes.Scope + Scopes.OfflineAccess,
+                },
+            });
+        }
+
+        // CIBA client (Client-Initiated Backchannel Authentication, poll mode). Confidential; uses
+        // the custom ciba grant at the token endpoint after the user approves out-of-band.
+        const string svcCiba = "svc-ciba";
+        if (await apps.FindByClientIdAsync(svcCiba) is null)
+        {
+            await apps.CreateAsync(new OpenIddictApplicationDescriptor
+            {
+                ClientId = svcCiba,
+                ClientSecret = "svc-ciba-secret-dev-only",
+                ClientType = ClientTypes.Confidential,
+                DisplayName = "CIBA backchannel client",
+                Permissions =
+                {
+                    Permissions.Endpoints.Token,
+                    Permissions.Prefixes.GrantType + OidcProvider.Api.Controllers.Ciba.GrantType,
+                    Permissions.Prefixes.Scope + "openid",
+                    Permissions.Scopes.Email, Permissions.Scopes.Profile,
+                    Permissions.Prefixes.Scope + Scopes.OfflineAccess,
+                },
+            });
+        }
+
+        // Token-exchange client (RFC 8693) — swaps a token it holds for a downscoped/delegated one.
+        const string svcExch = "svc-exchange";
+        if (await apps.FindByClientIdAsync(svcExch) is null)
+        {
+            await apps.CreateAsync(new OpenIddictApplicationDescriptor
+            {
+                ClientId = svcExch,
+                ClientSecret = "svc-exchange-secret-dev-only",
+                ClientType = ClientTypes.Confidential,
+                DisplayName = "Token-exchange client",
+                Permissions =
+                {
+                    Permissions.Endpoints.Token,
+                    Permissions.Prefixes.GrantType + OidcProvider.Api.Controllers.TokenController.TokenExchangeGrant,
+                    Permissions.GrantTypes.ClientCredentials, // to obtain a subject token for the demo
+                    Permissions.Prefixes.Scope + "api",
+                },
+            });
+        }
 
         await db.SaveChangesAsync();
     }

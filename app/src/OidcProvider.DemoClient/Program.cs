@@ -1,8 +1,13 @@
+using System.Collections.Concurrent;
 using System.Net;
+using System.Net.Http.Json;
 using System.Text;
+using System.Text.Json;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
+using Microsoft.IdentityModel.JsonWebTokens;
+using Microsoft.IdentityModel.Tokens;
 
 // A minimal Relying Party that signs in through the OIDC provider (authorization code +
 // PKCE, with PAR since the provider advertises it). Open http://localhost:5000.
@@ -14,12 +19,36 @@ builder.Services.AddDataProtection()
     .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(Path.GetTempPath(), "oidc-rp-dpkeys")))
     .SetApplicationName("oidc-demo-rp");
 
+// Sessions terminated by a back-channel logout_token (keyed by the id_token `sid`). A real RP
+// would persist this; in-memory is fine for the demo. The cookie middleware consults it on every
+// request so a logged-out session can't keep using its cookie.
+var revokedSids = new ConcurrentDictionary<string, byte>();
+var bclReceipts = new ConcurrentQueue<object>();
+
 builder.Services.AddAuthentication(o =>
     {
         o.DefaultScheme = CookieAuthenticationDefaults.AuthenticationScheme;
         o.DefaultChallengeScheme = "oidc";
     })
-    .AddCookie(o => o.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest)
+    .AddCookie(o =>
+    {
+        // Distinct name: OP and RP share host `localhost`, and cookies ignore port — the default
+        // `.AspNetCore.Cookies` would collide and the RP login would clobber the OP session.
+        o.Cookie.Name = ".DemoRP.Cookies";
+        o.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
+        // Back-channel logout enforcement: if this principal's session id was revoked by a
+        // logout_token, drop the cookie so the user is bounced back to sign-in.
+        o.Events.OnValidatePrincipal = ctx =>
+        {
+            var sid = ctx.Principal?.FindFirst("sid")?.Value;
+            if (sid is not null && revokedSids.ContainsKey(sid))
+            {
+                ctx.RejectPrincipal();
+                return ctx.HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+            }
+            return Task.CompletedTask;
+        };
+    })
     .AddOpenIdConnect("oidc", o =>
     {
         o.Authority = authority;                       // the OIDC provider
@@ -32,6 +61,7 @@ builder.Services.AddAuthentication(o =>
         o.Scope.Clear();
         o.Scope.Add("openid"); o.Scope.Add("email"); o.Scope.Add("profile"); o.Scope.Add("offline_access");
         o.GetClaimsFromUserInfoEndpoint = true;
+        o.ClaimActions.MapJsonKey("sid", "sid"); // keep id_token `sid` so back-channel logout can match
         o.SaveTokens = true;
         o.RequireHttpsMetadata = false;                // local http authority
         // Local http: correlation/nonce cookies must not require Secure (else dropped → "Correlation failed").
@@ -59,6 +89,64 @@ builder.Services.AddAuthentication(o =>
 
 var app = builder.Build();
 app.UseAuthentication();
+
+// OIDC Back-Channel Logout 1.0 receiver. The OP POSTs a signed logout_token here; we validate it
+// against the OP's JWKS and the BCL rules, then mark the session id revoked so the cookie dies.
+app.MapPost("/backchannel-logout", async (HttpContext ctx) =>
+{
+    var form = await ctx.Request.ReadFormAsync();
+    var token = form["logout_token"].ToString();
+    if (string.IsNullOrEmpty(token))
+        return Results.BadRequest("missing logout_token");
+
+    using var http = new HttpClient();
+    var conf = await http.GetFromJsonAsync<JsonElement>(
+        $"{authority.TrimEnd('/')}/.well-known/openid-configuration");
+    var jwks = new JsonWebKeySet(await http.GetStringAsync(conf.GetProperty("jwks_uri").GetString()));
+
+    var result = await new JsonWebTokenHandler().ValidateTokenAsync(token, new TokenValidationParameters
+    {
+        ValidIssuer = conf.GetProperty("issuer").GetString(),
+        ValidAudience = "demo-web",
+        IssuerSigningKeys = jwks.GetSigningKeys(),
+        ValidateLifetime = true,
+    });
+    if (!result.IsValid)
+    {
+        Console.WriteLine($"[BCL] logout_token rejected: {result.Exception?.GetType().Name}: {result.Exception?.Message}");
+        return Results.BadRequest(new { error = "invalid_token", detail = result.Exception?.Message });
+    }
+
+    var jwt = (JsonWebToken)result.SecurityToken;
+    // BCL §2.6 validation: events claim must carry the logout member, and a `nonce` MUST be absent
+    // (its presence is the tell of an id_token being replayed as a logout_token).
+    if (jwt.TryGetPayloadValue<string>("nonce", out _))
+        return Results.BadRequest(new { error = "nonce_present" });
+    if (!jwt.TryGetPayloadValue<JsonElement>("events", out var events) ||
+        !events.TryGetProperty("http://schemas.openid.net/event/backchannel-logout", out _))
+        return Results.BadRequest(new { error = "missing_logout_event" });
+
+    var sid = jwt.TryGetPayloadValue<string>("sid", out var s) ? s : null;
+    var sub = jwt.TryGetPayloadValue<string>("sub", out var su) ? su : null;
+    if (sid is not null) revokedSids[sid] = 1;
+    bclReceipts.Enqueue(new { received = true, sub, sid, aud = jwt.Audiences.FirstOrDefault() });
+    return Results.Ok(); // 200 → OP records success
+});
+
+// OIDC Front-Channel Logout 1.0 receiver. Loaded by the OP in a hidden iframe at end-session;
+// the `sid` query param (FCL session_required) identifies the session to terminate — which works
+// even when third-party-cookie rules would hide our own cookie inside the cross-site iframe.
+app.MapGet("/frontchannel-logout", (string? iss, string? sid) =>
+{
+    if (iss is not null && iss.TrimEnd('/') != authority.TrimEnd('/'))
+        return Results.BadRequest("iss mismatch");
+    if (sid is not null) revokedSids[sid] = 1;
+    bclReceipts.Enqueue(new { channel = "front", received = true, iss, sid });
+    return Results.Content("<!doctype html>logged out", "text/html");
+});
+
+// Inspection endpoint for the demo/tests: what logout signals have we accepted?
+app.MapGet("/backchannel-events", () => Results.Json(bclReceipts.ToArray()));
 
 app.MapGet("/login", () => Results.Challenge(new AuthenticationProperties { RedirectUri = "/" }, ["oidc"]));
 app.MapPost("/logout", () => Results.SignOut(   // RP-initiated logout (clears RP + provider session)

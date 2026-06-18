@@ -21,6 +21,7 @@ public interface IWebAuthnService
     Task<WebAuthnCredential?> VerifyRegistrationAsync(string sessionId, WebAuthnAttestation attestation, CancellationToken ct = default);
     // Assertion (navigator.credentials.get) — the login/2FA ceremony.
     Task<WebAuthnOptions> NewAssertionOptionsAsync(string sessionId, UserMfaMethod credential, CancellationToken ct = default);
+    Task<WebAuthnOptions> NewLoginOptionsAsync(string key, CancellationToken ct = default); // passwordless
     Task<bool> VerifyAssertionAsync(string sessionId, UserMfaMethod credential, WebAuthnAssertion assertion, CancellationToken ct = default);
 }
 
@@ -130,6 +131,15 @@ public sealed class WebAuthnService : IWebAuthnService
         var challenge = B64Url(RandomNumberGenerator.GetBytes(32));
         await _redis.StringSetAsync(Key(sid), challenge, TimeSpan.FromMinutes(5)); // bound to session
         return new WebAuthnOptions(challenge, _cfg.RpId, cred.SecretRef);
+    }
+
+    // Usernameless / passwordless login: a challenge bound to a pre-session key (cookie), with no
+    // allowCredentials so the browser offers any discoverable passkey for this RP.
+    public async Task<WebAuthnOptions> NewLoginOptionsAsync(string key, CancellationToken ct = default)
+    {
+        var challenge = B64Url(RandomNumberGenerator.GetBytes(32));
+        await _redis.StringSetAsync(Key(key), challenge, TimeSpan.FromMinutes(5));
+        return new WebAuthnOptions(challenge, _cfg.RpId, ""); // empty credentialId → discoverable
     }
 
     public async Task<bool> VerifyAssertionAsync(string sid, UserMfaMethod cred, WebAuthnAssertion a, CancellationToken ct = default)

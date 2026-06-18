@@ -65,15 +65,52 @@ public sealed class RegisterController : Controller
             desc.Permissions.Add(Permissions.Endpoints.Authorization);
             desc.Permissions.Add(Permissions.GrantTypes.AuthorizationCode);
             desc.Permissions.Add(Permissions.ResponseTypes.Code);
-            desc.Requirements.Add(Requirements.Features.ProofKeyForCodeExchange); // PKCE (ADR-0011)
+            if (_cfg.GetValue("Oidc:Pkce:Required", true))
+                desc.Requirements.Add(Requirements.Features.ProofKeyForCodeExchange); // PKCE (ADR-0011)
         }
         if (grantTypes.Contains("refresh_token")) desc.Permissions.Add(Permissions.GrantTypes.RefreshToken);
         if (grantTypes.Contains("client_credentials")) desc.Permissions.Add(Permissions.GrantTypes.ClientCredentials);
         foreach (var s in requestedScopes) desc.Permissions.Add(Permissions.Prefixes.Scope + s);
 
+        // Back-channel logout (OIDC BCL 1.0) opt-in. Validated as an absolute URI; stored as an
+        // application property the logout fan-out reads. Implies the end-session endpoint.
+        var bclUri = Str(body, "backchannel_logout_uri");
+        if (bclUri is not null)
+        {
+            if (!Uri.TryCreate(bclUri, UriKind.Absolute, out _))
+                return Error("invalid_client_metadata", $"backchannel_logout_uri is not an absolute URI: {bclUri}");
+            desc.Properties["backchannel_logout_uri"] = JsonSerializer.SerializeToElement(bclUri);
+            if (body.TryGetProperty("backchannel_logout_session_required", out var sr) &&
+                sr.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                desc.Properties["backchannel_logout_session_required"] = JsonSerializer.SerializeToElement(sr.GetBoolean());
+            desc.Permissions.Add(Permissions.Endpoints.EndSession);
+        }
+
+        // Front-channel logout (OIDC FCL 1.0) opt-in.
+        var fclUri = Str(body, "frontchannel_logout_uri");
+        if (fclUri is not null)
+        {
+            if (!Uri.TryCreate(fclUri, UriKind.Absolute, out _))
+                return Error("invalid_client_metadata", $"frontchannel_logout_uri is not an absolute URI: {fclUri}");
+            desc.Properties["frontchannel_logout_uri"] = JsonSerializer.SerializeToElement(fclUri);
+            if (body.TryGetProperty("frontchannel_logout_session_required", out var fsr) &&
+                fsr.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                desc.Properties["frontchannel_logout_session_required"] = JsonSerializer.SerializeToElement(fsr.GetBoolean());
+            desc.Permissions.Add(Permissions.Endpoints.EndSession);
+        }
+
+        // Client public keys (RFC 7591 `jwks`) — stored for JAR request-object verification
+        // (RFC 9101) and usable for private_key_jwt. Kept as the raw JWKS JSON.
+        if (body.TryGetProperty("jwks", out var jwksEl) && jwksEl.ValueKind == JsonValueKind.Object)
+            desc.Properties["jwks"] = JsonSerializer.SerializeToElement(jwksEl.GetRawText()); // raw JWKS JSON as a string node
+
+        // RFC 7592: a registration access token gates later read/update/delete of THIS client.
+        var rat = B64(RandomNumberGenerator.GetBytes(32));
+        desc.Properties["registration_access_token"] = JsonSerializer.SerializeToElement(rat);
+
         await _apps.CreateAsync(desc);
 
-        // RFC 7591 §3.2.1 response (client_secret returned once, at registration).
+        // RFC 7591 §3.2.1 response (client_secret + registration access token returned once).
         return Created(string.Empty, new Dictionary<string, object?>
         {
             ["client_id"] = clientId,
@@ -85,7 +122,46 @@ public sealed class RegisterController : Controller
             ["redirect_uris"] = redirectUris,
             ["scope"] = string.Join(' ', requestedScopes),
             ["client_name"] = Str(body, "client_name"),
+            ["backchannel_logout_uri"] = bclUri,
+            ["frontchannel_logout_uri"] = fclUri,
+            ["registration_access_token"] = rat,                          // RFC 7592
+            ["registration_client_uri"] = $"{Request.Scheme}://{Request.Host}/register/{clientId}",
         });
+    }
+
+    // RFC 7592 client configuration endpoint: read or delete a registration using the
+    // registration_access_token issued at creation. (Update/PUT omitted; re-register for changes.)
+    [HttpGet("/register/{clientId}"), Produces("application/json")]
+    public async Task<IActionResult> Read(string clientId)
+    {
+        var app = await AuthorizeManagementAsync(clientId);
+        if (app is null) return Unauthorized();
+        return Ok(new Dictionary<string, object?>
+        {
+            ["client_id"] = clientId,
+            ["client_name"] = await _apps.GetDisplayNameAsync(app),
+            ["redirect_uris"] = (await _apps.GetRedirectUrisAsync(app)).ToArray(),
+        });
+    }
+
+    [HttpDelete("/register/{clientId}")]
+    public async Task<IActionResult> Delete(string clientId)
+    {
+        var app = await AuthorizeManagementAsync(clientId);
+        if (app is null) return Unauthorized();
+        await _apps.DeleteAsync(app);
+        return NoContent();
+    }
+
+    // Validates the Bearer registration_access_token against the one stored on the client.
+    private async Task<object?> AuthorizeManagementAsync(string clientId)
+    {
+        var app = await _apps.FindByClientIdAsync(clientId);
+        if (app is null) return null;
+        var props = await _apps.GetPropertiesAsync(app);
+        if (!props.TryGetValue("registration_access_token", out var stored)) return null;
+        var presented = Request.Headers.Authorization.ToString();
+        return presented.Equals("Bearer " + stored.GetString(), StringComparison.Ordinal) ? app : null;
     }
 
     private IActionResult Error(string code, string desc) =>
