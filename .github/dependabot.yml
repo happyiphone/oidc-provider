@@ -6,6 +6,11 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
+    ignore:
+      # OpenIddict majors need a coordinated migration (API drift + aligned EF Core) — don't
+      # auto-propose them; minor/patch (6.x) updates still flow. See PR #9 (7.5.0 broke the build).
+      - dependency-name: "OpenIddict*"
+        update-types: ["version-update:semver-major"]
     groups:
       # batch the related framework packages into one PR to reduce noise
       aspnetcore-and-ef:
