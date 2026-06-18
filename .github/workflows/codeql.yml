@@ -25,6 +25,7 @@ jobs:
       - uses: github/codeql-action/init@v3
         with:
           languages: csharp
-          queries: security-and-quality
+          # security-focused (drops pure code-quality/maintainability notes that aren't vulns)
+          queries: security-extended
       - run: dotnet build app/OidcProvider.sln -c Release
       - uses: github/codeql-action/analyze@v3
