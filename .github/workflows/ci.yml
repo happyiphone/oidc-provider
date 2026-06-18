@@ -44,22 +44,30 @@ jobs:
           --collect:"XPlat Code Coverage" --results-directory ./coverage
       - name: Coverage report → job summary
         if: always()
+        continue-on-error: true   # informational — never fail the build on reporting
         run: |
-          dotnet tool install -g dotnet-reportgenerator-globaltool >/dev/null 2>&1 || true
           export PATH="$PATH:$HOME/.dotnet/tools"
+          dotnet tool install -g dotnet-reportgenerator-globaltool || true
           reportgenerator -reports:"coverage/**/coverage.cobertura.xml" \
-            -targetdir:coverage/report -reporttypes:"TextSummary;Html;MarkdownSummaryGithub" >/dev/null
-          { echo "## Code coverage"; cat coverage/report/SummaryGithub.md 2>/dev/null \
-            || cat coverage/report/Summary.txt; } >> "$GITHUB_STEP_SUMMARY"
+            -targetdir:coverage/report -reporttypes:"TextSummary;Html;MarkdownSummaryGithub" || true
+          { echo "## Code coverage"; \
+            cat coverage/report/SummaryGithub.md 2>/dev/null \
+            || cat coverage/report/Summary.txt 2>/dev/null \
+            || echo "(coverage report unavailable)"; } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload coverage (HTML)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: app/coverage/report
-      # Optional external coverage service — add a CODECOV_TOKEN secret to enable:
-      # - uses: codecov/codecov-action@v4
-      #   with: { token: "${{ secrets.CODECOV_TOKEN }}", files: app/coverage/**/coverage.cobertura.xml }
+      - name: Upload coverage to Codecov
+        if: always()
+        continue-on-error: true   # public repo → tokenless; never blocks the build
+        uses: codecov/codecov-action@v4
+        with:
+          files: app/coverage/**/coverage.cobertura.xml
+          flags: integration
+          fail_ci_if_error: false
 
   # Gate 2 — load smoke (single-instance sustainable tier) so a real regression fails the build.
   # Errors are the hard gate; latency budget is generous on shared runners (P95_MS).

@@ -1,0 +1,45 @@
+name: Release
+
+# Tag a version (e.g. `git tag v1.0.0 && git push --tags`) → build, test, and publish a GitHub
+# Release with auto-generated notes. The container image for the tag is published by docker.yml.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: { POSTGRES_DB: oidc, POSTGRES_USER: oidc, POSTGRES_PASSWORD: oidc_dev_only }
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U oidc" --health-interval 5s --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 3s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: 9.0.x }
+      - name: Build + test (release gate)
+        working-directory: app
+        env:
+          TEST_PG: "Host=localhost;Port=5432;Database=oidc_test;Username=oidc;Password=oidc_dev_only"
+          TEST_REDIS: "localhost:6379"
+        run: |
+          dotnet build OidcProvider.sln -c Release
+          dotnet test tests/OidcProvider.Tests/OidcProvider.Tests.csproj -c Release --no-build
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            OIDC Provider ${{ github.ref_name }}.
+            Container image: `ghcr.io/${{ github.repository }}:${{ github.ref_name }}` (see the Container image workflow).

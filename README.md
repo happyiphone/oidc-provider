@@ -1,6 +1,8 @@
 # OIDC Provider
 
 [![CI](https://github.com/happyiphone/oidc-provider/actions/workflows/ci.yml/badge.svg)](https://github.com/happyiphone/oidc-provider/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/happyiphone/oidc-provider/actions/workflows/codeql.yml/badge.svg)](https://github.com/happyiphone/oidc-provider/actions/workflows/codeql.yml)
+[![codecov](https://codecov.io/gh/happyiphone/oidc-provider/graph/badge.svg)](https://codecov.io/gh/happyiphone/oidc-provider)
 ![.NET 9](https://img.shields.io/badge/.NET-9.0-512BD4)
 ![OpenIddict 6.4](https://img.shields.io/badge/OpenIddict-6.4-1f6feb)
 ![OAuth 2.1](https://img.shields.io/badge/OAuth-2.1-success)
