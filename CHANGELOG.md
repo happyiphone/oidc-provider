@@ -19,6 +19,11 @@ All notable changes to this project. Format loosely follows
 - **Repo**: CI coverage, GHCR image publish, Dependabot, CodeQL (staged), Claude agent
   (staged), release/stale/labeler workflows, architecture + runbook docs.
 
+### Security
+- **Open-redirect fix**: post-login/MFA/federation `returnUrl` is now validated as a local URL
+  (`Url.IsLocalUrl`) — surfaced by CodeQL; regression-tested.
+- Enabled secret scanning + push protection, Dependabot security updates, and CodeQL (public).
+
 ### Fixed
 - `prompt=login` re-prompt loop; missing `auth_time` in id_token; discovery `plain` PKCE.
 - Dockerfile: use the .NET image's built-in non-root `app` user.
