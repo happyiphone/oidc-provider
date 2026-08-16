@@ -22,10 +22,10 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: 9.0.x
-      - uses: github/codeql-action/init@v3
+      - uses: github/codeql-action/init@v4
         with:
           languages: csharp
           # security-focused (drops pure code-quality/maintainability notes that aren't vulns)
           queries: security-extended
       - run: dotnet build app/OidcProvider.sln -c Release
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/analyze@v4
