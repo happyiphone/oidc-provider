@@ -63,7 +63,7 @@ jobs:
       - name: Upload coverage to Codecov
         if: always()
         continue-on-error: true   # public repo → tokenless; never blocks the build
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v7
         with:
           files: app/coverage/**/coverage.cobertura.xml
           flags: integration

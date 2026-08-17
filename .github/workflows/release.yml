@@ -37,7 +37,7 @@ jobs:
           dotnet build OidcProvider.sln -c Release
           dotnet test tests/OidcProvider.Tests/OidcProvider.Tests.csproj -c Release --no-build
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
           body: |
